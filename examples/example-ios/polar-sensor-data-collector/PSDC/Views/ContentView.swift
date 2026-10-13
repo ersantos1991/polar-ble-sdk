@@ -15,7 +15,6 @@ enum SelectedAction: String, CaseIterable {
 
 struct ContentView: View {
     @EnvironmentObject private var appState: AppState
-    @State private var selectedTab: SelectedAction = .online
     @State private var isSearchingDevices = false
     @State private var connectedDevicesText = ""
     @State private var showHrBroadcastView = false
@@ -25,7 +24,13 @@ struct ContentView: View {
     @State private var appHeader: String = NSLocalizedString("APP_NAME", comment: "")
     @State private var localModifications: String = ""
     @State private var presenting: Bool = false
-    
+    @State private var presentedMessageText: String = ""
+    @State private var shownMessageIds: Set<UUID> = []
+
+    @State private var isShareSheetPresented = false
+    @State private var appLogFileURL: URL?
+    @State private var showBuildInfoActions = false
+
     var body: some View {
         
         Spacer()
@@ -43,6 +48,25 @@ struct ContentView: View {
                 .onTapGesture {
                     toggleBuildInformation()
                 }
+            if showBuildInfoActions {
+                Button("Export PSDC app logs") {
+                    if appLogFileURL == nil {
+                        appLogFileURL = AppLogger.ensureLogFile()
+                    }
+                    isShareSheetPresented = true
+                }
+                .buttonStyle(SecondaryButtonStyle(buttonState: .released))
+                .padding(.top, 4)
+                .sheet(isPresented: $isShareSheetPresented) {
+                    if let url = appLogFileURL {
+                        ExportLogsView(text: "Export PSDC app logs", fileURL: url)
+                    } else {
+                        Text("No Application logs available.")
+                            .padding()
+                    }
+                }
+                Spacer()
+            }
             VStack(spacing: 10) {
                 if !bleSdkManager.isBluetoothOn {
                     Text("Bluetooth OFF")
@@ -68,6 +92,8 @@ struct ContentView: View {
                         if bleDeviceManager.connectedDevices().count > 1 {
                             Button("Disconnect all", action: {
                                 bleDeviceManager.disconnectAll()
+                                // Reset AppState to a fresh manager after disconnecting all devices
+                                appState.switchTo(bleDeviceManager.makeSdkManager())
                             }).buttonStyle(PrimaryButtonStyle(buttonState: getConnectButtonState()))
                         }
                     }
@@ -100,7 +126,7 @@ struct ContentView: View {
                         self.isSearchingDevices = !(self.isSearchingDevices)
                     }
 
-                if case .noDevice = bleSdkManager.deviceConnectionState {
+                if !bleSdkManager.deviceConnectionState.isConnected {
                     Button("Listen HR Broadcasts", action: {
                         self.showHrBroadcastView = true
                     })
@@ -110,16 +136,11 @@ struct ContentView: View {
                         HrBroadcastView()
                             .environmentObject(bleSdkManager)
                     }
-                } else if case .disconnected = bleSdkManager.deviceConnectionState {
-                    Button("Listen HR Broadcasts", action: {
-                        self.showHrBroadcastView = true
+                    Button("Auto Connect", action: {
+                        bleSdkManager.autoConnect()
                     })
                     .buttonStyle(PrimaryButtonStyle(buttonState: getSearchButtonState()))
                     .disabled(!bleSdkManager.isBluetoothOn)
-                    .sheet(isPresented: $showHrBroadcastView) {
-                        HrBroadcastView()
-                            .environmentObject(bleSdkManager)
-                    }
                 }
                 
                 Text("\(bleSdkManager.connectedDevicesText)")
@@ -130,7 +151,7 @@ struct ContentView: View {
                     })
                 }
                 
-                Picker("Choose operation", selection: $selectedTab) {
+                Picker("Choose operation", selection: $bleSdkManager.selectedTab) {
                     ForEach(SelectedAction.allCases, id: \.self) { action in
                         if shouldShowTab(action) {
                             Text(action.rawValue)
@@ -145,7 +166,7 @@ struct ContentView: View {
                 case .connecting:
                    ProgressView()
                 case .connected:
-                    OperationModesTabView(chosenActionView: selectedTab)
+                    OperationModesTabView(chosenActionView: bleSdkManager.selectedTab)
                         .environmentObject(bleSdkManager)
                     
                 }
@@ -156,25 +177,46 @@ struct ContentView: View {
         .alert("", isPresented: $presenting, actions: {
             // do nothing
         }, message: {
-            Text(appState.bleSdkManager.generalMessage?.text ?? "?")
+            Text(presentedMessageText)
         })
-        .onChange(of: appState.bleSdkManager.generalMessage?.text) { text in
-           presenting = text != nil
+        .onChange(of: appState.bleSdkManager.generalMessage?.id) { id in
+            // Track ids already shown so switching managers back and forth doesn't
+            // re-present a message, without mutating the manager's state from the view.
+            guard let message = appState.bleSdkManager.generalMessage,
+                  !shownMessageIds.contains(message.id) else { return }
+            shownMessageIds.insert(message.id)
+            presentedMessageText = message.text
+            presenting = true
         }
     }
     
     private func shouldShowTab(_ action: SelectedAction) -> Bool {
-        let deviceState = bleSdkManager.deviceConnectionState.get()
-        
+        let isConnected: Bool
+        switch bleSdkManager.deviceConnectionState {
+        case .connected:
+            isConnected = true
+        default:
+            isConnected = false
+        }
+
         switch action {
-        case .online, .settings:
-            return true
-        case .offline, .logging, .activityRecordingView:
-            return deviceState.hasSAGRFCFileSystem
+
+        case .settings:
+            return isConnected && bleSdkManager.fileTransferFeature.isSupported
+            
+        case .online:
+            return isConnected && bleSdkManager.onlineStreamingFeature.isSupported
+
+        case .offline:
+            return isConnected && bleSdkManager.offlineRecordingFeature.isSupported
+
+        case .logging, .activityRecordingView:
+            return isConnected && bleSdkManager.activityDataFeature.isSupported
+
         case .h10Exercise:
-            return isH10Device()
+            return isConnected && isH10Device()
         case .exerciseV2:
-            return bleSdkManager.offlineExerciseV2Supported
+            return isConnected && bleSdkManager.offlineExerciseV2Supported
         }
     }
     
@@ -186,13 +228,15 @@ struct ContentView: View {
     }
     
     func toggleBuildInformation() {
+        appLogFileURL = AppLogger.ensureLogFile()
         if appHeader == NSLocalizedString("APP_NAME", comment: "") {
             
             appHeader = NSLocalizedString("APP_NAME", comment: "") + "\n" + getBuildInfo()
+            showBuildInfoActions = true
             
-            let appLocalModifications = 
+            let appLocalModifications =
                 Bundle.main.object(forInfoDictionaryKey: "GIT_APP_LOCALLY_MODIFIED") as? String ?? ""
-            let sdkLocalModifications = 
+            let sdkLocalModifications =
                 Bundle.main.object(forInfoDictionaryKey: "GIT_SDK_LOCALLY_MODIFIED") as? String ?? ""
             localModifications = ""
             
@@ -206,6 +250,7 @@ struct ContentView: View {
         } else {
             appHeader = NSLocalizedString("APP_NAME", comment: "")
             localModifications = ""
+            showBuildInfoActions = false
         }
     }
     
@@ -258,7 +303,7 @@ struct ContentView: View {
             nextSdkManager.connectToDevice(withId: nextDevice.deviceId)
             appState.switchTo(nextSdkManager)
         } else {
-            appState.switchTo(PolarBleSdkManager())
+            appState.switchTo(deviceManager.makeSdkManager())
         }
     }
 }
@@ -283,7 +328,7 @@ struct OperationModesTabView: View {
                 DeviceSettingsView()
                     .environmentObject(bleSdkManager)
             case .logging:
-                SensorDatalogSettingsView()
+                LoggingSettingsView()
                     .environmentObject(bleSdkManager)
             case .activityRecordingView:
                 ActivityRecordingView()

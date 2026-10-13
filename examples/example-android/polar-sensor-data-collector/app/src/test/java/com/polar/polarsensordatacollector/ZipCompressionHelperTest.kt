@@ -1,0 +1,259 @@
+package com.polar.polarsensordatacollector
+
+import com.polar.polarsensordatacollector.ui.utils.ZipCompressionHelper
+
+import android.content.Context
+import android.net.Uri
+import androidx.test.core.app.ApplicationProvider
+import org.junit.Before
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import java.io.File
+import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
+
+@RunWith(RobolectricTestRunner::class)
+class ZipCompressionHelperTest {
+
+    private lateinit var context: Context
+    private lateinit var testDir: File
+
+    @Before
+    fun setUp() {
+        context = ApplicationProvider.getApplicationContext()
+        testDir = File(context.cacheDir, "test_files")
+        testDir.mkdirs()
+    }
+
+    /**
+     * Test: calculateTotalSize with single file
+     * Expected: Returns correct file size
+     */
+    @Test
+    fun testCalculateTotalSize_SingleFile() {
+        // Arrange
+        val testFile = File(testDir, "test_file.txt")
+        testFile.writeText("A".repeat(1024)) // 1KB
+
+        val uri = Uri.fromFile(testFile)
+
+        // Act
+        val size = ZipCompressionHelper.calculateTotalSize(context, listOf(uri))
+
+        // Assert
+        assertEquals(1024, size)
+
+        // Cleanup
+        testFile.delete()
+    }
+
+    /**
+     * Test: calculateTotalSize with multiple files
+     * Expected: Returns sum of all file sizes
+     */
+    @Test
+    fun testCalculateTotalSize_MultipleFiles() {
+        // Arrange
+        val file1 = File(testDir, "file1.txt").apply { writeText("A".repeat(1024)) }
+        val file2 = File(testDir, "file2.txt").apply { writeText("B".repeat(2048)) }
+        val file3 = File(testDir, "file3.txt").apply { writeText("C".repeat(512)) }
+        val uris = listOf(Uri.fromFile(file1), Uri.fromFile(file2), Uri.fromFile(file3))
+
+        // Act
+        val totalSize = ZipCompressionHelper.calculateTotalSize(context, uris)
+
+        // Assert
+        assertEquals(3584, totalSize) // 1024 + 2048 + 512
+
+        // Cleanup
+        file1.delete(); file2.delete(); file3.delete()
+    }
+
+    /**
+     * Test: compressFilesIfNeeded returns null for small files
+     * Expected: No compression when total size < 25MB
+     */
+    @Test
+    fun testCompressFilesIfNeeded_BelowThreshold() {
+        // Arrange
+        val smallFile = File(testDir, "small.txt").apply { writeText("A".repeat(1024 * 100)) }
+        val uri = Uri.fromFile(smallFile)
+
+        // Act
+        val result = ZipCompressionHelper.compressFilesIfNeeded(context, listOf(uri))
+
+        // Assert
+        assertNull(result, "Compression should not occur for files below 25MB")
+
+        // Cleanup
+        smallFile.delete()
+    }
+
+    /**
+     * Test: Error handling for non-existent files
+     * Expected: Returns null without crashing
+     */
+    @Test
+    fun testCompressFilesIfNeeded_InvalidFile() {
+        // Arrange
+        val invalidUri = Uri.fromFile(File(testDir, "nonexistent.txt"))
+
+        // Act
+        val result = ZipCompressionHelper.compressFilesIfNeeded(context, listOf(invalidUri))
+
+        // Assert
+        assertNull(result, "Should handle invalid files gracefully")
+    }
+
+    /**
+     * Test: calculateTotalSize with empty list
+     * Expected: Returns 0
+     */
+    @Test
+    fun testCalculateTotalSize_EmptyList() {
+        // Act
+        val size = ZipCompressionHelper.calculateTotalSize(context, emptyList())
+
+        // Assert
+        assertEquals(0, size)
+    }
+
+    /**
+     * Test: ZIP files are created in cache directory
+     * Expected: ZIP file exists after compression attempt
+     */
+    @Test
+    fun testZipFileCreationLocation() {
+        // Verify cache directory cleanup removes ZIP files
+        // Create dummy ZIP file in cache
+        val oldZipFile = File(context.cacheDir, "recordings_old.zip")
+        oldZipFile.createNewFile()
+        oldZipFile.setLastModified(System.currentTimeMillis() - 7200000) // 2 hours ago
+
+        assertTrue(oldZipFile.exists(), "Test ZIP file should be created")
+
+        // Run cleanup (should remove old files)
+        ZipCompressionHelper.cleanupOldZipFiles(context, maxAgeMs = 60 * 60 * 1000)
+
+        // Assert
+        assertTrue(!oldZipFile.exists(), "Old ZIP file should be cleaned up")
+    }
+
+    // ── createDeviceLogsZipFile ───────────────────────────────────────────────
+
+    /**
+     * Test: createDeviceLogsZipFile produces a valid ZIP containing all log entries
+     * Expected: ZIP file exists, has correct entry names and byte-for-byte data
+     */
+    @Test
+    fun testCreateDeviceLogsZipFile_ContainsAllEntries() {
+        val logs = listOf(
+            "/ERRORLOG.BPB" to "error log".toByteArray(),
+            "/SYSLOG.TXT"   to "sys log".toByteArray(),
+            "/TRC1.BIN"     to byteArrayOf(0x01, 0x02, 0x03)
+        )
+
+        val zipFile = ZipCompressionHelper.createDeviceLogsZipFile(context, logs, deviceId = "A1B2C3")
+
+        assertTrue(zipFile.exists())
+        assertTrue(zipFile.length() > 0)
+
+        val entries = mutableMapOf<String, ByteArray>()
+        java.util.zip.ZipFile(zipFile).use { zf ->
+            for (entry in zf.entries()) {
+                entries[entry.name] = zf.getInputStream(entry).readBytes()
+            }
+        }
+
+        assertEquals(3, entries.size)
+        assertTrue(entries.containsKey("ERRORLOG.BPB"))
+        assertTrue(entries.containsKey("SYSLOG.TXT"))
+        assertTrue(entries.containsKey("TRC1.BIN"))
+        assertTrue(entries["ERRORLOG.BPB"]!!.contentEquals("error log".toByteArray()))
+        assertTrue(entries["SYSLOG.TXT"]!!.contentEquals("sys log".toByteArray()))
+        assertTrue(entries["TRC1.BIN"]!!.contentEquals(byteArrayOf(0x01, 0x02, 0x03)))
+
+        zipFile.delete()
+    }
+
+    /**
+     * Test: createDeviceLogsZipFile filename follows device_logs-<id>-<timestamp>.zip pattern
+     * Expected: Filename starts with "device_logs-A1B2C3-" and ends with ".zip"
+     */
+    @Test
+    fun testCreateDeviceLogsZipFile_FilenamePattern() {
+        val zipFile = ZipCompressionHelper.createDeviceLogsZipFile(
+            context,
+            listOf("/SYSLOG.TXT" to "data".toByteArray()),
+            deviceId = "A1B2C3"
+        )
+
+        assertTrue(
+            zipFile.name.startsWith("device_logs-A1B2C3-"),
+            "Filename '${zipFile.name}' should start with 'device_logs-A1B2C3-'"
+        )
+        assertTrue(zipFile.name.endsWith(".zip"))
+
+        zipFile.delete()
+    }
+
+    /**
+     * Test: createDeviceLogsZipFile uses "unknown" when deviceId is blank
+     * Expected: Filename contains "unknown" when no device ID is provided
+     */
+    @Test
+    fun testCreateDeviceLogsZipFile_BlankDeviceIdUsesUnknown() {
+        val zipFile = ZipCompressionHelper.createDeviceLogsZipFile(
+            context,
+            listOf("/SYSLOG.TXT" to "data".toByteArray()),
+            deviceId = ""
+        )
+
+        assertTrue(
+            zipFile.name.startsWith("device_logs-unknown-"),
+            "Filename '${zipFile.name}' should contain 'unknown' for blank deviceId"
+        )
+
+        zipFile.delete()
+    }
+
+    /**
+     * Test: createDeviceLogsZipFile with empty log list produces an empty (but valid) ZIP
+     * Expected: ZIP file is created with no entries
+     */
+    @Test
+    fun testCreateDeviceLogsZipFile_EmptyLogs() {
+        val zipFile = ZipCompressionHelper.createDeviceLogsZipFile(context, emptyList(), deviceId = "XYZ")
+
+        assertTrue(zipFile.exists())
+        var entryCount = 0
+        java.util.zip.ZipFile(zipFile).use { zf -> zf.entries().iterator().forEach { entryCount++ } }
+        assertEquals(0, entryCount)
+
+        zipFile.delete()
+    }
+
+    /**
+     * Test: Cleanup only removes old files
+     * Expected: Recent ZIP files are not deleted
+     */
+    @Test
+    fun testCleanupOldZipFiles_PreservesRecent() {
+        // Create a recent ZIP file
+        val recentZipFile = File(context.cacheDir, "recordings_${System.currentTimeMillis()}.zip")
+        recentZipFile.createNewFile()
+
+        // Run cleanup with 1-hour threshold
+        ZipCompressionHelper.cleanupOldZipFiles(context, maxAgeMs = 60 * 60 * 1000)
+
+        // Assert
+        assertTrue(recentZipFile.exists(), "Recent ZIP file should be preserved")
+
+        // Cleanup
+        recentZipFile.delete()
+    }
+}
+

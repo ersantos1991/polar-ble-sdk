@@ -15,6 +15,8 @@ struct UserDeviceSettingsView: View {
     @State private var settings = PolarUserDeviceSettingsData()
     @State private var isTelemetryEnabled: Bool = false
     @State private var isAutoOHREnabled: Bool = false
+    @State private var showError = false
+    @State private var errorMessage = ""
 
     var deviceId: String
 
@@ -41,15 +43,6 @@ struct UserDeviceSettingsView: View {
                             }
                         }
                     }
-                }.task {
-                    let settings = await bleSdkManager.getUserDeviceSettings()
-                    selectedUserDeviceLocation = (settings?.deviceLocation.rawValue)!
-                    isUSBConnectionEnabled = settings?.usbConnectionMode ==  PolarUserDeviceSettings.UsbConnectionMode.ON ? true : false
-                    isAutomaticTrainingDetectionEnabled = settings?.automaticTrainingDetectionMode ==  PolarUserDeviceSettings.AutomaticTrainingDetectionMode.ON ? true : false
-                    automaticTrainingDetectionMinimumDuration = String(describing: settings?.minimumTrainingDurationSeconds ?? 0)
-                    automaticTrainingDetectionSensitity = String(describing: settings?.automaticTrainingDetectionSensitivity ?? 0)
-                    isTelemetryEnabled = settings?.telemetryEnabled ?? false
-                    isAutoOHREnabled = settings?.autosFilesEnabled ?? false
                 }
 
                 Section(header: Text("USB settings")) {
@@ -128,30 +121,70 @@ struct UserDeviceSettingsView: View {
             .opacity(formValidation.isOK ? 1 : 0.5)
 
         }.navigationBarTitle("User device settings", displayMode: .inline)
+        .onChange(of: bleSdkManager.userDeviceSettingsError) { newValue in
+            guard let newValue else { return }
+            errorMessage = newValue
+            showError = true
+        }
+        .alert("Error", isPresented: $showError) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(errorMessage)
+        }
+        .task {
+            let settings = await bleSdkManager.getUserDeviceSettings()
+            if let loadError = bleSdkManager.userDeviceSettingsError {
+                errorMessage = loadError
+                showError = true
+            }
+            selectedUserDeviceLocation = settings?.deviceLocation.rawValue ?? selectedUserDeviceLocation
+            isUSBConnectionEnabled = settings?.usbConnectionMode == PolarUserDeviceSettings.UsbConnectionMode.ON ? true : false
+            isAutomaticTrainingDetectionEnabled = settings?.automaticTrainingDetectionMode == PolarUserDeviceSettings.AutomaticTrainingDetectionMode.ON ? true : false
+            automaticTrainingDetectionMinimumDuration = String(describing: settings?.minimumTrainingDurationSeconds ?? 0)
+            automaticTrainingDetectionSensitity = String(describing: settings?.automaticTrainingDetectionSensitivity ?? 0)
+            isTelemetryEnabled = settings?.telemetryEnabled ?? false
+            isAutoOHREnabled = settings?.autosFilesEnabled ?? false
+        }
     }
 
     func submitData() async {
-        
+        bleSdkManager.userDeviceSettingsError = nil
+
         await bleSdkManager.setUserDeviceLocation(location: PolarUserDeviceSettings.DeviceLocation(
             rawValue: selectedUserDeviceLocation)?.toInt() ?? 0)
+        if handleSettingsError() { return }
 
         await bleSdkManager.setUsbConnectionMode(enabled: isUSBConnectionEnabled)
+        if handleSettingsError() { return }
         
         await bleSdkManager.setTelemetryEnabled(enabled: isTelemetryEnabled)
+        if handleSettingsError() { return }
 
         await bleSdkManager.setAutomaticTrainingDetectionSettings(
             mode: isAutomaticTrainingDetectionEnabled,
             sensitivity: Int(automaticTrainingDetectionSensitity) ?? 0,
             minimumDuration: Int(automaticTrainingDetectionMinimumDuration) ?? 0
         )
+        if handleSettingsError() { return }
         
         await bleSdkManager.setAutomaticOHRMeasurementEnabled(enabled: isAutoOHREnabled)
+        if handleSettingsError() { return }
 
         await bleSdkManager.setDaylightSavingTime()
+        if handleSettingsError() { return }
 
         await MainActor.run {
             presentationMode.wrappedValue.dismiss()
         }
+    }
+
+    private func handleSettingsError() -> Bool {
+        guard let settingsError = bleSdkManager.userDeviceSettingsError else {
+            return false
+        }
+        errorMessage = settingsError
+        showError = true
+        return true
     }
 
     func cancel() async {

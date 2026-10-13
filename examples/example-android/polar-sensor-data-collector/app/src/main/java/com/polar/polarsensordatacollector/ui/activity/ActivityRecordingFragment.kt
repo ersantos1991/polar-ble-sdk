@@ -46,6 +46,7 @@ class ActivityRecordingFragment : Fragment(R.layout.fragment_activity_recording)
     private lateinit var activeTimeButton: Button
     private lateinit var activitySamplesButton: Button
     private lateinit var dailySummaryButton: Button
+    private lateinit var spo2TestButton: Button
 
     private lateinit var trainingSessionsButton: Button
 
@@ -74,9 +75,7 @@ class ActivityRecordingFragment : Fragment(R.layout.fragment_activity_recording)
         viewLifecycleOwner.lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 viewModel.uiShowError.collect {
-                    if (it.header.isNotEmpty()) {
                         showSnackBar(rootView = requireView(), it.header, it.description ?: "", showAsError = true)
-                    }
                 }
             }
         }
@@ -84,9 +83,7 @@ class ActivityRecordingFragment : Fragment(R.layout.fragment_activity_recording)
         viewLifecycleOwner.lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 viewModel.uiShowInfo.collect {
-                    if (it.header.isNotEmpty()) {
-                        showSnackBar(rootView = requireView(), it.header, it.description ?: "")
-                    }
+                        showSnackBar(rootView = requireView(), it.header, it.description ?: "", timeout = it.timeout)
                 }
             }
         }
@@ -155,6 +152,12 @@ class ActivityRecordingFragment : Fragment(R.layout.fragment_activity_recording)
             type = PolarBleApi.PolarActivityDataType.DAILY_SUMMARY
             showDateRangePicker()
         }
+
+        spo2TestButton.setOnClickListener {
+            viewModel.initView()
+            type = PolarBleApi.PolarActivityDataType.SPO2_TEST
+            showDateRangePicker()
+        }
     }
 
     private fun showCaloriesTypePicker() {
@@ -186,7 +189,7 @@ class ActivityRecordingFragment : Fragment(R.layout.fragment_activity_recording)
         val dateRange: MaterialDatePicker<Pair<Long, Long>> = MaterialDatePicker
             .Builder
             .dateRangePicker()
-            .setTitleText("Select date range")
+            .setTitleText(getString(R.string.select_date_range))
             .setTheme(R.style.MaterialCalendarTheme)
             .setCalendarConstraints(constraints.build())
             .build()
@@ -206,7 +209,7 @@ class ActivityRecordingFragment : Fragment(R.layout.fragment_activity_recording)
                 } else {
                     val polarActivityDataType = type as PolarBleApi.PolarActivityDataType
                     val navigateAction = MainFragmentDirections.activityToActivityTriggerAction(
-                        viewModel.deviceId,
+                        viewModel.identifier,
                         fromDate!!.format(this.dateFormatter),
                         toDate!!.format(this.dateFormatter),
                         polarActivityDataType.name,
@@ -234,5 +237,6 @@ class ActivityRecordingFragment : Fragment(R.layout.fragment_activity_recording)
         trainingSessionsButton = view.findViewById(R.id.button_get_training_sessions)
         activitySamplesButton = view.findViewById(R.id.button_get_activity_samples)
         dailySummaryButton = view.findViewById(R.id.button_get_daily_summary)
+        spo2TestButton = view.findViewById(R.id.button_get_spo2_test)
     }
 }

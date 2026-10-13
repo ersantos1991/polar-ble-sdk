@@ -7,6 +7,7 @@ import com.polar.androidcommunications.api.ble.model.gatt.client.pmd.PmdOfflineT
 import com.polar.androidcommunications.api.ble.model.gatt.client.pmd.PmdSecret
 import com.polar.androidcommunications.api.ble.model.gatt.client.pmd.PmdSetting
 import com.polar.androidcommunications.api.ble.model.gatt.client.pmd.model.AccData
+import com.polar.androidcommunications.api.ble.model.gatt.client.pmd.model.DerivedAccData
 import com.polar.androidcommunications.api.ble.model.gatt.client.pmd.model.EcgData
 import com.polar.androidcommunications.api.ble.model.gatt.client.pmd.model.GnssLocationData
 import com.polar.androidcommunications.api.ble.model.gatt.client.pmd.model.GyrData
@@ -25,6 +26,24 @@ import java.util.Collections
 internal object PolarDataUtils {
     private const val TAG = "PolarDataUtils"
 
+    /**
+     * Converts a raw PMD timestamp (an unsigned nanosecond counter, epoch 1.1.2000) to the signed
+     * [Long] type used by the public Polar data model classes.
+     *
+     * [ULong.toLong] is an unchecked bit-pattern reinterpretation: if the unsigned value is greater
+     * than [Long.MAX_VALUE], it silently wraps into a negative [Long] instead of failing. That would
+     * hand a corrupted, negative timestamp to SDK consumers without any indication anything went
+     * wrong. Fail loudly instead so the corruption is surfaced rather than silently propagated.
+     */
+    private fun ULong.toCheckedLong(): Long {
+        if (this > Long.MAX_VALUE.toULong()) {
+            throw PolarBleSdkInternalException(
+                "Timestamp value $this exceeds Long.MAX_VALUE and cannot be represented as a signed timestamp without data corruption"
+            )
+        }
+        return this.toLong()
+    }
+
     fun mapPMDClientPpgDataToPolarPpg(ppgData: PpgData): PolarPpgData {
         var type: PolarPpgData.PpgDataType = PolarPpgData.PpgDataType.UNKNOWN
         val listOfSamples = mutableListOf<PolarPpgData.PolarPpgSample>()
@@ -36,7 +55,7 @@ internal object PolarDataUtils {
                     val statusData = mutableListOf<Int>() // No channel status available for PPG frame type 0. Put empty into listOfSamples.
                     channelsData.addAll(sample.ppgDataSamples)
                     channelsData.add(sample.ambientSample)
-                    listOfSamples.add(PolarPpgData.PolarPpgSample(sample.timeStamp.toLong(), channelsData, statusData))
+                    listOfSamples.add(PolarPpgData.PolarPpgSample(sample.timeStamp.toCheckedLong(), channelsData, statusData))
                 }
                 is PpgData.PpgDataFrameType7 -> {
                     type = PolarPpgData.PpgDataType.FRAME_TYPE_7
@@ -44,7 +63,7 @@ internal object PolarDataUtils {
                     val statusData = mutableListOf<Int>()
                     channelsData.addAll(sample.ppgDataSamples)
                     statusData.addAll(sample.statusBits)
-                    listOfSamples.add(PolarPpgData.PolarPpgSample(sample.timeStamp.toLong(), channelsData, statusData))
+                    listOfSamples.add(PolarPpgData.PolarPpgSample(sample.timeStamp.toCheckedLong(), channelsData, statusData))
                 }
                 is PpgData.PpgDataFrameType8 -> {
                     type = PolarPpgData.PpgDataType.FRAME_TYPE_8
@@ -52,14 +71,14 @@ internal object PolarDataUtils {
                     val statusData = mutableListOf<Int>()
                     channelsData.addAll(sample.ppgDataSamples)
                     statusData.addAll(sample.statusBits)
-                    listOfSamples.add(PolarPpgData.PolarPpgSample(sample.timeStamp.toLong(), channelsData, statusData))
+                    listOfSamples.add(PolarPpgData.PolarPpgSample(sample.timeStamp.toCheckedLong(), channelsData, statusData))
                 }
                 is PpgData.PpgDataSampleSportId -> {
                     type = PolarPpgData.PpgDataType.SPORT_ID
                     val samplesData = mutableListOf<Int>()
                     val statusData = mutableListOf<Int>() // No channel status available for PPG frame type 6. Put empty into listOfSamples.
                     samplesData.addAll(listOf(sample.sportId.toInt()))
-                    listOfSamples.add(PolarPpgData.PolarPpgSample(sample.timeStamp.toLong(), samplesData, statusData))
+                    listOfSamples.add(PolarPpgData.PolarPpgSample(sample.timeStamp.toCheckedLong(), samplesData, statusData))
                 }
                 is PpgData.PpgDataFrameType4 -> {
                     type = PolarPpgData.PpgDataType.FRAME_TYPE_4
@@ -68,14 +87,14 @@ internal object PolarDataUtils {
                     samplesData.addAll(sample.channel1GainTs.map { it.toInt() })
                     samplesData.addAll(sample.channel2GainTs.map { it.toInt() })
                     samplesData.addAll(sample.numIntTs.map { it.toInt() })
-                    listOfSamples.add(PolarPpgData.PolarPpgSample(sample.timeStamp.toLong(), samplesData, statusData))
+                    listOfSamples.add(PolarPpgData.PolarPpgSample(sample.timeStamp.toCheckedLong(), samplesData, statusData))
                 }
                 is PpgData.PpgDataFrameType5 -> {
                     type = PolarPpgData.PpgDataType.FRAME_TYPE_5
                     val samplesData = mutableListOf<Int>()
                     val statusData = mutableListOf<Int>() // No channel status available for PPG frame type 5. Put empty into listOfSamples.
                     samplesData.addAll(listOf((sample.operationMode).toInt()))
-                    listOfSamples.add(PolarPpgData.PolarPpgSample(sample.timeStamp.toLong(), samplesData, statusData))
+                    listOfSamples.add(PolarPpgData.PolarPpgSample(sample.timeStamp.toCheckedLong(), samplesData, statusData))
                 }
                 is PpgData.PpgDataFrameType9 -> {
                     type = PolarPpgData.PpgDataType.FRAME_TYPE_9
@@ -84,7 +103,7 @@ internal object PolarDataUtils {
                     samplesData.addAll(sample.channel1GainTs.map { it.toInt() })
                     samplesData.addAll(sample.channel2GainTs.map { it.toInt() })
                     samplesData.addAll(sample.numIntTs.map { it.toInt() })
-                    listOfSamples.add(PolarPpgData.PolarPpgSample(sample.timeStamp.toLong(), samplesData,statusData))
+                    listOfSamples.add(PolarPpgData.PolarPpgSample(sample.timeStamp.toCheckedLong(), samplesData,statusData))
                 }
                 is PpgData.PpgDataFrameType10 -> {
                     type = PolarPpgData.PpgDataType.FRAME_TYPE_10
@@ -94,7 +113,7 @@ internal object PolarDataUtils {
                     samplesData.addAll(sample.redSamples.map { it })
                     samplesData.addAll(sample.irSamples.map { it })
                     statusData.addAll(sample.statusBits)
-                    listOfSamples.add(PolarPpgData.PolarPpgSample(sample.timeStamp.toLong(), samplesData, statusData))
+                    listOfSamples.add(PolarPpgData.PolarPpgSample(sample.timeStamp.toCheckedLong(), samplesData, statusData))
                 }
                 is PpgData.PpgDataFrameType13 -> {
                     type = PolarPpgData.PpgDataType.FRAME_TYPE_13
@@ -103,7 +122,7 @@ internal object PolarDataUtils {
                     samplesData.addAll(sample.ppgChannel0.map { it })
                     samplesData.addAll(sample.ppgChannel1.map { it })
                     statusData.addAll(sample.statusBits)
-                    listOfSamples.add(PolarPpgData.PolarPpgSample(sample.timeStamp.toLong(), samplesData, statusData))
+                    listOfSamples.add(PolarPpgData.PolarPpgSample(sample.timeStamp.toCheckedLong(), samplesData, statusData))
                 }
 
                 is PpgData.PpgDataFrameType14 -> {
@@ -113,7 +132,7 @@ internal object PolarDataUtils {
                     samplesData.addAll(sample.channel1GainTs1.map { it.toInt() })
                     samplesData.addAll(sample.channel2GainTs1.map { it.toInt() })
                     samplesData.addAll(sample.numIntTs1.map { it.toInt() })
-                    listOfSamples.add(PolarPpgData.PolarPpgSample(sample.timeStamp.toLong(), samplesData, statusData))
+                    listOfSamples.add(PolarPpgData.PolarPpgSample(sample.timeStamp.toCheckedLong(), samplesData, statusData))
                 }
             }
         }
@@ -138,6 +157,7 @@ internal object PolarDataUtils {
                     hr = sample.hr,
                     ppgQuality = sample.ppgQuality,
                     correctedHr = sample.correctedHr,
+                    rrs = emptyList(),
                     rrsMs = emptyList(),
                     rrAvailable = false,
                     contactStatus = false,
@@ -154,7 +174,7 @@ internal object PolarDataUtils {
             when (sample) {
                 is GnssLocationData.GnssCoordinateSample -> {
                     val gpsCoordinatesSample = GpsCoordinatesSample(
-                        timeStamp = sample.timeStamp.toLong(),
+                        timeStamp = sample.timeStamp.toCheckedLong(),
                         latitude = sample.latitude,
                         longitude = sample.longitude,
                         time = sample.date,
@@ -173,7 +193,7 @@ internal object PolarDataUtils {
                 }
                 is GnssLocationData.GnssGpsNMEASample -> {
                     val gpsNMEASample = GpsNMEASample(
-                        timeStamp = sample.timeStamp.toLong(),
+                        timeStamp = sample.timeStamp.toCheckedLong(),
                         measurementPeriod = sample.measurementPeriod,
                         statusFlags = sample.statusFlags,
                         nmeaMessage = sample.nmeaMessage
@@ -182,7 +202,7 @@ internal object PolarDataUtils {
                 }
                 is GnssLocationData.GnssSatelliteDilutionSample -> {
                     val gpsCoordinatesSample = GpsSatelliteDilutionSample(
-                        timeStamp = sample.timeStamp.toLong(),
+                        timeStamp = sample.timeStamp.toCheckedLong(),
                         dilution = sample.dilution, altitude = sample.altitude,
                         numberOfSatellites = sample.numberOfSatellites, fix = sample.fix
                     )
@@ -190,7 +210,7 @@ internal object PolarDataUtils {
                 }
                 is GnssLocationData.GnssSatelliteSummarySample -> {
                     val gpsSatelliteSummarySample = GpsSatelliteSummarySample(
-                        timeStamp = sample.timeStamp.toLong(),
+                        timeStamp = sample.timeStamp.toCheckedLong(),
                         seenSatelliteSummaryBand1 = SatelliteSummary(
                             gpsNbrOfSat = sample.seenGnssSatelliteSummaryBand1.gpsNbrOfSat,
                             gpsMaxSnr = sample.seenGnssSatelliteSummaryBand1.gpsMaxSnr,
@@ -252,11 +272,11 @@ internal object PolarDataUtils {
         for (sample in ecgData.ecgSamples) {
             when (sample) {
                 is EcgData.EcgSample -> {
-                    val ecgSample = EcgSample(timeStamp = sample.timeStamp.toLong(), voltage = sample.microVolts)
+                    val ecgSample = EcgSample(timeStamp = sample.timeStamp.toCheckedLong(), voltage = sample.microVolts)
                     ecgDataSamples.add(ecgSample)
                 }
                 is EcgData.EcgSampleFrameType3 -> {
-                    val ecgSample = FecgSample(timeStamp = sample.timeStamp.toLong(), ecg = sample.data0, bioz = sample.data1, status = sample.status)
+                    val ecgSample = FecgSample(timeStamp = sample.timeStamp.toCheckedLong(), ecg = sample.data0, bioz = sample.data1, status = sample.status)
                     ecgDataSamples.add(ecgSample)
                 }
             }
@@ -267,15 +287,29 @@ internal object PolarDataUtils {
     fun mapPmdClientAccDataToPolarAcc(accData: AccData): PolarAccelerometerData {
         val samples: MutableList<PolarAccelerometerData.PolarAccelerometerDataSample> = mutableListOf()
         for ((timeStamp, x, y, z) in accData.accSamples) {
-            samples.add(PolarAccelerometerData.PolarAccelerometerDataSample(timeStamp.toLong(), x, y, z))
+            samples.add(PolarAccelerometerData.PolarAccelerometerDataSample(timeStamp.toCheckedLong(), x, y, z))
         }
         return PolarAccelerometerData(samples)
+    }
+
+    fun mapPmdClientDerivedAccDataToPolarDerivedAcc(derivedAccData: DerivedAccData): PolarDerivedAccData {
+        val samples = derivedAccData.derivedSamples.map { sample ->
+            val methodValues = sample.methodValues
+                .mapNotNull { (id, values) -> PolarDerivedMeasurementMethod.fromId(id)?.let { it to values } }
+                .toMap()
+            PolarDerivedSample(
+                timeStamp = sample.timeStamp.toCheckedLong(),
+                activeMethods = methodValues.keys,
+                methodValues = methodValues
+            )
+        }
+        return PolarDerivedAccData(samples)
     }
 
     fun mapPmdClientGyroDataToPolarGyro(gyroData: GyrData): PolarGyroData {
         val samples: MutableList<PolarGyroData.PolarGyroDataSample> = mutableListOf()
         for ((timeStamp, x, y, z) in gyroData.gyrSamples) {
-            samples.add(PolarGyroData.PolarGyroDataSample(timeStamp.toLong(), x, y, z))
+            samples.add(PolarGyroData.PolarGyroDataSample(timeStamp.toCheckedLong(), x, y, z))
         }
         return PolarGyroData(samples)
     }
@@ -283,7 +317,7 @@ internal object PolarDataUtils {
     fun mapPmdClientMagDataToPolarMagnetometer(magData: MagData): PolarMagnetometerData {
         val samples: MutableList<PolarMagnetometerData.PolarMagnetometerDataSample> = mutableListOf()
         for ((timeStamp, x, y, z) in magData.magSamples) {
-            samples.add(PolarMagnetometerData.PolarMagnetometerDataSample(timeStamp.toLong(), x, y, z))
+            samples.add(PolarMagnetometerData.PolarMagnetometerDataSample(timeStamp.toCheckedLong(), x, y, z))
         }
         return PolarMagnetometerData(samples)
     }
@@ -291,7 +325,7 @@ internal object PolarDataUtils {
     fun mapPmdClientPressureDataToPolarPressure(pressureData: PressureData): PolarPressureData {
         val samples: MutableList<PolarPressureData.PolarPressureDataSample> = mutableListOf()
         for ((timeStamp, pressure) in pressureData.pressureSamples) {
-            samples.add(PolarPressureData.PolarPressureDataSample(timeStamp.toLong(), pressure))
+            samples.add(PolarPressureData.PolarPressureDataSample(timeStamp.toCheckedLong(), pressure))
         }
         return PolarPressureData(samples)
     }
@@ -309,6 +343,7 @@ internal object PolarDataUtils {
             PolarBleApi.PolarDeviceDataType.TEMPERATURE -> PmdMeasurementType.TEMPERATURE
             PolarBleApi.PolarDeviceDataType.SKIN_TEMPERATURE -> PmdMeasurementType.SKIN_TEMP
             PolarBleApi.PolarDeviceDataType.HR -> PmdMeasurementType.OFFLINE_HR
+            PolarBleApi.PolarDeviceDataType.DERIVED_MEASUREMENT -> PmdMeasurementType.DERIVED_MEASUREMENT
         }
     }
 
@@ -325,6 +360,7 @@ internal object PolarDataUtils {
             PmdMeasurementType.TEMPERATURE -> PolarBleApi.PolarDeviceDataType.TEMPERATURE
             PmdMeasurementType.OFFLINE_HR -> PolarBleApi.PolarDeviceDataType.HR
             PmdMeasurementType.SKIN_TEMP -> PolarBleApi.PolarDeviceDataType.SKIN_TEMPERATURE
+            PmdMeasurementType.DERIVED_MEASUREMENT -> PolarBleApi.PolarDeviceDataType.DERIVED_MEASUREMENT
             else -> throw PolarBleSdkInternalException("Error when map measurement type $pmdMeasurementType to Polar feature")
         }
     }
@@ -444,7 +480,7 @@ internal object PolarDataUtils {
         for (sample in offlineTemperatureData.temperatureSamples) {
             samples.add(
                 PolarTemperatureData.PolarTemperatureDataSample(
-                    timeStamp = sample.timeStamp.toLong(),
+                    timeStamp = sample.timeStamp.toCheckedLong(),
                     temperature = sample.temperature
                 )
             )
@@ -455,7 +491,7 @@ internal object PolarDataUtils {
     fun mapPmdClientTemperatureDataToPolarTemperature(temperatureData: TemperatureData): PolarTemperatureData {
         val samples: MutableList<PolarTemperatureData.PolarTemperatureDataSample> = mutableListOf()
         for ((timeStamp, temperature) in temperatureData.temperatureSamples) {
-            samples.add(PolarTemperatureData.PolarTemperatureDataSample(timeStamp.toLong(), temperature))
+            samples.add(PolarTemperatureData.PolarTemperatureDataSample(timeStamp.toCheckedLong(), temperature))
         }
         return PolarTemperatureData(samples)
     }
@@ -463,9 +499,75 @@ internal object PolarDataUtils {
     fun mapPmdClientSkinTemperatureDataToPolarTemperatureData(skinTemperatureData: SkinTemperatureData): PolarTemperatureData {
         val samples: MutableList<PolarTemperatureData.PolarTemperatureDataSample> = mutableListOf()
         for ((timeStamp, temperature) in skinTemperatureData.skinTemperatureSamples) {
-            samples.add(PolarTemperatureData.PolarTemperatureDataSample(timeStamp.toLong(), temperature))
+            samples.add(PolarTemperatureData.PolarTemperatureDataSample(timeStamp.toCheckedLong(), temperature))
         }
         return PolarTemperatureData(samples)
+    }
+
+    /**
+     * Maps a [PmdSetting] (returned by Get Derived Measurement Settings Group) to a
+     * [PolarDerivedMeasurementSettingsGroup] for SDK consumers.
+     *
+     * @param requestedGroupId the group ID used when querying this settings block.  Used as a
+     *   fallback when the device does NOT echo the GROUP_ID field in the response payload (which is
+     *   common).  Without this fallback groupId would silently default to 0, causing
+     *   ERROR_INVALID_DERIVED_MEASUREMENT_SETTINGS_GROUP on the subsequent start command.
+     */
+    fun mapPmdSettingsToPolarDerivedMeasurementSettingsGroup(
+        pmdSetting: PmdSetting,
+        requestedGroupId: Int = 0
+    ): PolarDerivedMeasurementSettingsGroup {
+        val groupId = pmdSetting.settings[PmdSetting.PmdSettingType.DERIVED_MEASUREMENT_SETTINGS_GROUP_ID]
+            ?.firstOrNull() ?: requestedGroupId
+
+        val sourceTypes = pmdSetting.settings[PmdSetting.PmdSettingType.SOURCE_MEASUREMENT_TYPE]
+            ?.mapNotNull { id ->
+                try {
+                    mapPmdClientFeatureToPolarFeature(PmdMeasurementType.fromId(id.toByte()))
+                } catch (_: Exception) {
+                    null
+                }
+            }
+            ?.toSet() ?: emptySet()
+
+        val sourceSampleRates = pmdSetting.settings[PmdSetting.PmdSettingType.SOURCE_MEASUREMENT_SAMPLE_RATE]
+            ?.toSet() ?: emptySet()
+
+        val timeWindowOptions = pmdSetting.settings[PmdSetting.PmdSettingType.DERIVED_MEASUREMENT_TIME_WINDOW]
+            ?.toSet() ?: emptySet()
+
+        val supportedMethods = pmdSetting.settings[PmdSetting.PmdSettingType.DERIVED_MEASUREMENT_METHOD]
+            ?.mapNotNull { methodId -> PolarDerivedMeasurementMethod.fromId(methodId) }
+            ?.toSet() ?: emptySet()
+
+        return PolarDerivedMeasurementSettingsGroup(
+            groupId = groupId,
+            sourceTypes = sourceTypes,
+            sourceSampleRates = sourceSampleRates,
+            timeWindowOptions = timeWindowOptions,
+            supportedMethods = supportedMethods
+        )
+    }
+
+    /**
+     * Maps [PolarDerivedMeasurementSettings] to a [PmdSetting] ready for serialization
+     * in a Request Measurement Start command.
+     *
+     * Selected methods are encoded as a bitmask stored in the single Int for
+     * [PmdSetting.PmdSettingType.DERIVED_MEASUREMENT_METHOD]. [PmdSetting.serializeSelected]
+     * expands this bitmask back to individual 1-byte method IDs on the wire.
+     */
+    fun mapPolarDerivedMeasurementSettingsToPmdSettings(settings: PolarDerivedMeasurementSettings): PmdSetting {
+        val methodBitmask = settings.selectedMethods.fold(0) { acc, m -> acc or (1 shl m.id) }
+        val selected: MutableMap<PmdSetting.PmdSettingType, Int> = mutableMapOf(
+            PmdSetting.PmdSettingType.DERIVED_MEASUREMENT_SETTINGS_GROUP_ID to settings.groupId,
+            PmdSetting.PmdSettingType.SOURCE_MEASUREMENT_TYPE to
+                    mapPolarFeatureToPmdClientMeasurementType(settings.sourceMeasurementType).numVal.toInt(),
+            PmdSetting.PmdSettingType.SOURCE_MEASUREMENT_SAMPLE_RATE to settings.sourceSampleRate,
+            PmdSetting.PmdSettingType.DERIVED_MEASUREMENT_TIME_WINDOW to settings.timeWindowMs,
+            PmdSetting.PmdSettingType.DERIVED_MEASUREMENT_METHOD to methodBitmask
+        )
+        return PmdSetting(selected)
     }
 }
 

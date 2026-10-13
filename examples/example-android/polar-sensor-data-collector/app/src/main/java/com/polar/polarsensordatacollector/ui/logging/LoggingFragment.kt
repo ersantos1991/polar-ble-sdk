@@ -1,16 +1,30 @@
 package com.polar.polarsensordatacollector.ui.logging
 
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
+import android.util.Log
 import android.view.View
+import android.view.View.GONE
+import android.view.View.VISIBLE
 import android.widget.Button
+import android.widget.EditText
+import android.widget.Toast
+import androidx.core.content.FileProvider
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.viewModels
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
+import com.google.android.material.progressindicator.CircularProgressIndicator
+import com.google.android.material.switchmaterial.SwitchMaterial
 import com.polar.polarsensordatacollector.R
 import com.polar.polarsensordatacollector.ui.utils.ErrorLogUtils
+import com.polar.polarsensordatacollector.ui.utils.ZipCompressionHelper
+import com.polar.polarsensordatacollector.ui.utils.showSnackBar
 import com.polar.sdk.api.model.LogConfig
+import com.polar.sdk.api.model.PolarDeviceLog
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.launch
 
@@ -25,6 +39,12 @@ class LoggingFragment: Fragment(R.layout.fragment_logging) {
     private lateinit var caloriesLoggingButton: Button
     private lateinit var sleepLoggingButton: Button
     private lateinit var fetchErrorLogButton: Button
+    private lateinit var hrSensorLogInfoButton: Button
+    private lateinit var hrSensorLogWaitForConnectionSwitch: SwitchMaterial
+    private lateinit var hrSensorDeviceInformation: EditText
+
+    private lateinit var exportDeviceLogsButton: Button
+    private lateinit var exportDeviceLogsProgress: CircularProgressIndicator
 
     private val viewModel: LoggingViewModel by viewModels()
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
@@ -76,6 +96,35 @@ class LoggingFragment: Fragment(R.layout.fragment_logging) {
                 }
             }
         }
+
+        hrSensorLogInfoButton.setOnClickListener {
+            viewModel.setHrSensorLogConfig(
+                deviceName = hrSensorDeviceInformation.text.toString(),
+                waitForConnect = hrSensorLogWaitForConnectionSwitch.isChecked
+            )
+            showToast(getString(R.string.hr_sensor_log_updated), requireContext())
+        }
+
+        exportDeviceLogsButton.setOnClickListener {
+            exportDeviceLogsButton.isEnabled = false
+            exportDeviceLogsProgress.visibility = VISIBLE
+            viewModel.exportDeviceLogs(
+                onSuccess = { logs ->
+                    exportDeviceLogsProgress.visibility = GONE
+                    exportDeviceLogsButton.isEnabled = true
+                    if (logs.isEmpty()) {
+                        showSnackBar(rootView = requireView(), header = getString(R.string.export_device_logs_empty), showAsError = false)
+                    } else {
+                        shareDeviceLogs(logs)
+                    }
+                },
+                onError = { error ->
+                    exportDeviceLogsProgress.visibility = GONE
+                    exportDeviceLogsButton.isEnabled = true
+                    showSnackBar(rootView = requireView(), header = getString(R.string.export_device_logs_error), error, showAsError = true)
+                }
+            )
+        }
     }
 
     private fun setupViews(view: View) {
@@ -87,6 +136,11 @@ class LoggingFragment: Fragment(R.layout.fragment_logging) {
         caloriesLoggingButton = view.findViewById(R.id.enable_calories_logging_button)
         sleepLoggingButton = view.findViewById(R.id.enable_sleep_logging_button)
         fetchErrorLogButton = view.findViewById(R.id.fetch_errorlog_button)
+        exportDeviceLogsButton = view.findViewById(R.id.export_device_logs_button)
+        exportDeviceLogsProgress = view.findViewById(R.id.export_device_logs_progress)
+        hrSensorLogInfoButton = view.findViewById(R.id.set_hr_log_settings_button)
+        hrSensorDeviceInformation = view.findViewById(R.id.set_hr_log_settings_input)
+        hrSensorLogWaitForConnectionSwitch = view.findViewById(R.id.wait_for_connection_toggle)
     }
 
     private fun logConfigStatusChange(logConfig: LogConfig) {
@@ -131,5 +185,53 @@ class LoggingFragment: Fragment(R.layout.fragment_logging) {
         } else {
             sleepLoggingButton.text = getString(R.string.sleep_logging_enable)
         }
+
+        if (logConfig.hrSensorConfig?.waitUntilConnected ?: false) {
+            hrSensorLogWaitForConnectionSwitch.isChecked = true
+        } else {
+            hrSensorLogWaitForConnectionSwitch.isChecked = false
+        }
+
+        if (logConfig.hrSensorConfig?.deviceInformation?.isNotEmpty() == true) {
+            hrSensorDeviceInformation.setText(logConfig.hrSensorConfig!!.deviceInformation)
+        } else {
+            hrSensorDeviceInformation.setText("")
+        }
+    }
+
+    private fun shareDeviceLogs(logs: List<PolarDeviceLog>) {
+        try {
+            val logPairs = logs.map { it.path to it.data }
+            val zipFile = ZipCompressionHelper.createDeviceLogsZipFile(requireContext(), logPairs, viewModel.uiIdentifier)
+            val uri: Uri = FileProvider.getUriForFile(
+                requireContext(),
+                "com.polar.polarsensordatacollector.fileprovider",
+                zipFile
+            )
+            val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                type = "application/zip"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                putExtra(Intent.EXTRA_SUBJECT, getString(R.string.export_device_logs_sharing_title))
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivity(Intent.createChooser(shareIntent, getString(R.string.export_device_logs_sharing_title)))
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to create device logs ZIP: ${e.message}", e)
+            showSnackBar(
+                rootView = requireView(),
+                header = getString(R.string.export_device_logs_error),
+                e.message ?: "",
+                showAsError = true
+            )
+        }
+    }
+
+    companion object {
+        private const val TAG = "LoggingFragment"
+    }
+
+    private fun showToast(message: String, context: Context) {
+        val toast = Toast.makeText(context, message, Toast.LENGTH_SHORT)
+        toast.show()
     }
 }

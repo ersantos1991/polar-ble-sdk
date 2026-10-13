@@ -33,11 +33,17 @@ abstract class PolarBleApiCallback : PolarBleApiCallbackProvider {
     override fun deviceConnecting(polarDeviceInfo: PolarDeviceInfo) {}
 
     /**
-     * Device is now disconnected
+     * Device is now disconnected.
      *
      * @param polarDeviceInfo Polar device information
      */
+    @Deprecated("Use deviceDisconnected(polarDeviceInfo, info) for typed disconnect diagnostics")
     override fun deviceDisconnected(polarDeviceInfo: PolarDeviceInfo) {}
+
+    override fun deviceDisconnected(
+        polarDeviceInfo: PolarDeviceInfo,
+        info: PolarBleDisconnectInfo
+    ) {}
 
     /**
      * Called when the feature in connected device is available and it is ready. Called only for the features which are specified by [PolarBleApi] instantiation.
@@ -100,4 +106,20 @@ abstract class PolarBleApiCallback : PolarBleApiCallbackProvider {
      * @param unavailable features not supported by this device
      */
     override fun bleSdkFeaturesReadiness(identifier: String, ready: List<PolarBleApi.PolarBleSdkFeature>, unavailable: List<PolarBleApi.PolarBleSdkFeature>) {}
+
+    /**
+     * The device came back into BLE range. Requires feature
+     * [PolarBleApi.PolarBleSdkFeature.FEATURE_COMPANION_DEVICE_MANAGEMENT].
+     *
+     * @param identifier Polar device id or bt address
+     */
+    override fun polarCompanionDeviceAppeared(identifier: String) {}
+
+    /**
+     * The device is no longer in BLE range. Requires feature
+     * [PolarBleApi.PolarBleSdkFeature.FEATURE_COMPANION_DEVICE_MANAGEMENT].
+     *
+     * @param identifier Polar device id or bt address
+     */
+    override fun polarCompanionDeviceDisappeared(identifier: String) {}
 }

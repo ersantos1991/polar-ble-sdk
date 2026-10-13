@@ -37,7 +37,7 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:maxLines="1"
-                android:text="SampleRate"
+                android:text="@string/sample_rate"
                 android:textColor="@android:color/white" />
 
             <TextView
@@ -60,7 +60,7 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:maxLines="1"
-                android:text="Resolution"
+                android:text="@string/resolution"
                 android:textColor="@android:color/white" />
 
             <TextView
@@ -83,7 +83,7 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:maxLines="1"
-                android:text="Range"
+                android:text="@string/range"
                 android:textColor="@android:color/white" />
 
             <TextView
@@ -106,7 +106,7 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:maxLines="1"
-                android:text="Channels"
+                android:text="@string/channels"
                 android:textColor="@android:color/white" />
 
             <TextView
@@ -131,7 +131,7 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:maxLines="1"
-            android:text="Measured sampleRate (Hz): "
+            android:text="@string/measured_sample_rate"
             android:textColor="@android:color/white"
             android:visibility="gone"
             tools:visibility="visible" />
@@ -169,7 +169,7 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:maxLines="1"
-            android:text="range"
+            android:text="@string/range"
             android:textColor="@android:color/white"
             android:visibility="gone"
             tools:visibility="visible" />
@@ -315,6 +315,47 @@
             android:textSize="12sp"
             android:visibility="gone"
             tools:visibility="visible" />
+
+        <Button
+            android:id="@+id/open_ecg_graph_button"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:minHeight="0dp"
+            android:minWidth="0dp"
+            android:paddingHorizontal="12dp"
+            android:paddingVertical="4dp"
+            android:text="@string/graph"
+            android:textSize="12sp"
+            android:visibility="gone"
+            tools:visibility="visible" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/second_data_row"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="0dp"
+        android:layout_marginBottom="2dp"
+        android:orientation="horizontal"
+        android:visibility="gone">
+
+        <TextView
+            android:id="@+id/second_data_header"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:maxLines="1"
+            android:paddingEnd="4dp"
+            android:textColor="@android:color/white"
+            android:visibility="gone"
+            tools:text="rrsMs:" />
+
+        <TextView
+            android:id="@+id/second_data"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textColor="@android:color/white"
+            android:visibility="gone"
+            tools:text="820, 815" />
     </LinearLayout>
 
     <TextView

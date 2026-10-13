@@ -13,12 +13,13 @@ import java.io.IOException
 import java.io.OutputStream
 import java.time.LocalDateTime
 import java.util.*
-import kotlin.math.log
 
 class DataCollector(private val context: Context) {
     companion object {
         private const val TAG = "DataCollector"
         private const val LOGS_DIRECTORY = "/sensorDataLogs/"
+        private const val DEVICE_TIMESTAMP_LABEL = "NSECS-SINCE-01-01-2000-DEVICE"
+        private const val PSDC_TIMESTAMP_LABEL = "NSECS-SINCE-01-01-2000-PSDC"
     }
 
     interface FileOperations {
@@ -74,13 +75,13 @@ class DataCollector(private val context: Context) {
         }
     }
 
-    internal class FileOperationWrapper(private val context: Context, override val fileName: String, tag: String) : FileOperations {
+    internal class FileOperationWrapper(private val context: Context, override val fileName: String, tag: String, logId: String) : FileOperations {
         private val outputStream: FileOutputStream
         private val file: File
         private var isWriteOngoing = false
 
         init {
-            val directoryName = makeParentDir(tag)
+            val directoryName = makeParentDir(tag, logId)
             file = File(context.getExternalFilesDir(null).toString() + directoryName + fileName)
             file.createNewFile()
             outputStream = FileOutputStream(file)
@@ -90,8 +91,13 @@ class DataCollector(private val context: Context) {
             return isWriteOngoing
         }
 
-        private fun makeParentDir(tag: String): String {
-            val directoryName = "${LOGS_DIRECTORY}$tag/"
+        /** Creates (or clears) the per-device stream directory.
+         *  Directory layout: sensorDataLogs/<streamType>/<sanitizedDeviceId>/
+         *  Using per-device subdirectories prevents one device's new session from deleting
+         *  another device's currently-open log files. */
+        private fun makeParentDir(tag: String, logId: String): String {
+            val sanitizedLogId = logId.replace(Regex("[^A-Za-z0-9_\\-]"), "_")
+            val directoryName = "${LOGS_DIRECTORY}$tag/$sanitizedLogId/"
             val dir = File(context.getExternalFilesDir(null), directoryName)
             if (dir.exists()) {
                 if (dir.isDirectory) {
@@ -131,7 +137,6 @@ class DataCollector(private val context: Context) {
 
     private val logStreams: MutableMap<StreamType, FileOperations> = EnumMap(StreamType::class.java)
     private var latestTimeStamp: Long = 0
-    private var ppgTimeStamp: Long = 0
 
     private fun startNewLogWithTag(tag: String, logId: String, startTime: LocalDateTime = LocalDateTime.now()): FileOperations {
         val timeTag = startTime.toString()
@@ -142,7 +147,7 @@ class DataCollector(private val context: Context) {
         return if (isBackUpEnabled && backUpUri.isNotEmpty()) {
             DocumentFileOperationWrapper(context, fileName, Uri.parse(backUpUri))
         } else {
-            FileOperationWrapper(context, fileName, tag)
+            FileOperationWrapper(context, fileName, tag, logId)
         }
     }
 
@@ -155,7 +160,9 @@ class DataCollector(private val context: Context) {
 
     @Throws(IOException::class)
     fun startPpgLog(logId: String, startTime: LocalDateTime = LocalDateTime.now()) {
-        logStreams[StreamType.PPG] = startNewLogWithTag("PPG", logId, startTime)
+        if (!logStreams.containsKey(StreamType.PPG)) {
+            logStreams[StreamType.PPG] = startNewLogWithTag("PPG", logId, startTime)
+        }
     }
 
     @Throws(IOException::class)
@@ -242,7 +249,7 @@ class DataCollector(private val context: Context) {
         latestTimeStamp = timeStamp
         logStreams[StreamType.ACC]?.let { stream ->
             if (!stream.isStarted()) {
-                val headerLine = "TIMESTAMP X(mg) Y(mg) Z(mg)\n"
+                val headerLine = "$DEVICE_TIMESTAMP_LABEL X(mg) Y(mg) Z(mg)\n"
                 stream.write(headerLine)
             }
             val logLine = "$timeStamp $x $y $z\n"
@@ -255,7 +262,7 @@ class DataCollector(private val context: Context) {
         latestTimeStamp = timeStamp
         logStreams[StreamType.ECG]?.let { stream ->
             if (!stream.isStarted()) {
-                val headerLine = "TIMESTAMP ECG(microV)\n"
+                val headerLine = "$DEVICE_TIMESTAMP_LABEL ECG(microV)\n"
                 stream.write(headerLine)
             }
             val logLine = "$timeStamp $ecg\n"
@@ -268,7 +275,7 @@ class DataCollector(private val context: Context) {
         latestTimeStamp = timeStamp
         logStreams[StreamType.ECG]?.let { stream ->
             if (!stream.isStarted()) {
-                val headerLine = "TIMESTAMP ECG BIOZ STATUS\n"
+                val headerLine = "$DEVICE_TIMESTAMP_LABEL ECG BIOZ STATUS\n"
                 stream.write(headerLine)
             }
             val logLine = "$timeStamp $ecg $bioz $status\n"
@@ -280,10 +287,12 @@ class DataCollector(private val context: Context) {
     fun logHr(timeStamp: Long? = null, data: PolarHrData.PolarHrSample) {
         logStreams[StreamType.HR]?.let { stream ->
             if (!stream.isStarted()) {
-                var headerLine = "TIMESTAMP HR PPQ_QUALITY CORRECTED_HR RR_AVAILABLE CONTACT_SUPPORTED CONTACT_STATUS RR(ms)\n"
+                var headerLine = "$PSDC_TIMESTAMP_LABEL HR PPQ_QUALITY CORRECTED_HR RR_AVAILABLE CONTACT_SUPPORTED CONTACT_STATUS RRs(ms) | hrsRRs(1/1024s)\n"
                 stream.write(headerLine)
             }
-            val logLine = "${timeStamp ?: ""} ${data.hr} ${data.ppgQuality} ${data.correctedHr} ${data.rrAvailable} ${data.contactStatusSupported} ${data.contactStatus} ${if (data.rrsMs.isEmpty()) "NA" else data.rrsMs.joinToString(separator = " ")}\n"
+            val rawRr = if (data.rrs.isEmpty()) "NA" else data.rrs.joinToString(separator = " ")
+            val rrMs = if (data.rrsMs.isEmpty()) "NA" else data.rrsMs.joinToString(separator = " ")
+            val logLine = "${timeStamp ?: ""} ${data.hr} ${data.ppgQuality} ${data.correctedHr} ${data.rrAvailable} ${data.contactStatusSupported} ${data.contactStatus} $rrMs | $rawRr\n"
             stream.write(logLine)
         }
     }
@@ -292,14 +301,13 @@ class DataCollector(private val context: Context) {
     fun logPpgData(ppgData: PolarPpgData) {
         logStreams[StreamType.PPG]?.let { stream ->
             if (!stream.isStarted()) {
-                stream.write("PPG FRAME TYPE ${ppgData.type}\n")
                 val ppgChannels = ppgData.samples[0].channelSamples
                 val ppgStatuses = ppgData.samples[0].statusBits
-                var headerLine = "TIMESTAMP"
+                var headerLine = DEVICE_TIMESTAMP_LABEL
                 var index = 0
                 for (channel in ppgChannels) {
                     headerLine = headerLine.plus(" ")
-                    headerLine = headerLine.plus("CHANNEL${index++}")
+                    headerLine = headerLine.plus("PPG${index++}")
                 }
                 index = 0
                 for (status in ppgStatuses) {
@@ -330,7 +338,7 @@ class DataCollector(private val context: Context) {
     fun logPpi(ppi: Int, errorEstimate: Int, blocker: Boolean, contact: Boolean, contactSupported: Boolean, hr: Int, timeStamp: ULong) {
         logStreams[StreamType.PPI]?.let { stream ->
             if (!stream.isStarted()) {
-                val headerLine = "TIMESTAMP PPI(ms) ERROR_ESTIMATE BLOCKER_BIT SKIN_CONTACT_STATUS SKIN_CONTACT_SUPPORT HR\n"
+                val headerLine = "$DEVICE_TIMESTAMP_LABEL PPI(ms) ERROR_ESTIMATE BLOCKER_BIT SKIN_CONTACT_STATUS SKIN_CONTACT_SUPPORT HR\n"
                 stream.write(headerLine)
             }
             val logLine = "$timeStamp $ppi $errorEstimate ${if (blocker) 1 else 0} ${if (contact) 1 else 0} ${if (contactSupported) 1 else 0} $hr\n"
@@ -343,7 +351,7 @@ class DataCollector(private val context: Context) {
         latestTimeStamp = timeStamp
         logStreams[StreamType.MAGNETOMETER]?.let { stream ->
             if (!stream.isStarted()) {
-                val headerLine = "TIMESTAMP X(Gauss) Y(Gauss) Z(Gauss)\n"
+                val headerLine = "$DEVICE_TIMESTAMP_LABEL X(Gauss) Y(Gauss) Z(Gauss)\n"
                 stream.write(headerLine)
             }
             val logLine = "$timeStamp $x $y $z\n"
@@ -356,7 +364,7 @@ class DataCollector(private val context: Context) {
         latestTimeStamp = timeStamp
         logStreams[StreamType.GYRO]?.let { stream ->
             if (!stream.isStarted()) {
-                val headerLine = "TIMESTAMP X(deg/sec) Y(deg/sec) Z(deg/sec)\n"
+                val headerLine = "$DEVICE_TIMESTAMP_LABEL X(deg/sec) Y(deg/sec) Z(deg/sec)\n"
                 stream.write(headerLine)
             }
             val logLine = "$timeStamp $x $y $z\n"
@@ -369,7 +377,7 @@ class DataCollector(private val context: Context) {
         latestTimeStamp = timeStamp
         logStreams[StreamType.PRESSURE]?.let { stream ->
             if (!stream.isStarted()) {
-                val headerLine = "TIMESTAMP Pressure(mBar)\n"
+                val headerLine = "$DEVICE_TIMESTAMP_LABEL Pressure(mBar)\n"
                 stream.write(headerLine)
             }
             val logLine = "$timeStamp $pressure\n"
@@ -382,7 +390,7 @@ class DataCollector(private val context: Context) {
         latestTimeStamp = timeStamp
         logStreams[StreamType.LOCATION_COORDINATES]?.let { stream ->
             if (!stream.isStarted()) {
-                val headerLine = "TIMESTAMP LATITUDE LONGITUDE TIME CUMULATIVE_DISTANCE SPEED USED_ACCELERATION_SPEED COORDINATE_SPEED ACCELERATION_SPEED_FACTORY COURSE GPS_CHIP_SPEED FIX SPEED_FLAG FUSION_STATE\n"
+                val headerLine = "$DEVICE_TIMESTAMP_LABEL LATITUDE LONGITUDE TIME CUMULATIVE_DISTANCE SPEED USED_ACCELERATION_SPEED COORDINATE_SPEED ACCELERATION_SPEED_FACTORY COURSE GPS_CHIP_SPEED FIX SPEED_FLAG FUSION_STATE\n"
                 stream.write(headerLine)
             }
             val logLine = "$timeStamp ${location.latitude} ${location.longitude} ${location.time} ${location.cumulativeDistance} ${location.speed} ${location.usedAccelerationSpeed} ${location.coordinateSpeed} ${location.accelerationSpeedFactor} ${location.course} ${location.gpsChipSpeed} ${location.fix} ${location.speedFlag} ${location.fusionState}\n"
@@ -395,7 +403,7 @@ class DataCollector(private val context: Context) {
         latestTimeStamp = timeStamp
         logStreams[StreamType.LOCATION_DILUTION]?.let { stream ->
             if (!stream.isStarted()) {
-                val headerLine = "TIMESTAMP DILUTION ALTITUDE NUMBER_OF_SATELLITES FIX\n"
+                val headerLine = "$DEVICE_TIMESTAMP_LABEL DILUTION ALTITUDE NUMBER_OF_SATELLITES FIX\n"
                 stream.write(headerLine)
             }
             val logLine = "$timeStamp ${satelliteDilutionSample.dilution} ${satelliteDilutionSample.altitude} ${satelliteDilutionSample.numberOfSatellites} ${satelliteDilutionSample.fix}\n"
@@ -408,7 +416,7 @@ class DataCollector(private val context: Context) {
         latestTimeStamp = timeStamp
         logStreams[StreamType.LOCATION_SUMMARY]?.let { stream ->
             if (!stream.isStarted()) {
-                val headerLine = "TIMESTAMP " +
+                val headerLine = "$DEVICE_TIMESTAMP_LABEL " +
                         "SEEN_B1_GPS_NBR_OF_SAT " +
                         "SEEN_B1_GPS_MAX_SNR " +
                         "SEEN_B1_GLONASS_NBR_OF_SAT " +
@@ -505,7 +513,7 @@ class DataCollector(private val context: Context) {
         latestTimeStamp = timeStamp
         logStreams[StreamType.LOCATION_NMEA]?.let { stream ->
             if (!stream.isStarted()) {
-                val headerLine = "TIMESTAMP MEASUREMENT_PERIOD STATUS_FLAGS NMEA_MESSAGE\n"
+                val headerLine = "$DEVICE_TIMESTAMP_LABEL MEASUREMENT_PERIOD STATUS_FLAGS NMEA_MESSAGE\n"
                 stream.write(headerLine)
             }
             val logLine = "$timeStamp ${nmeaSample.measurementPeriod} ${nmeaSample.statusFlags} ${nmeaSample.nmeaMessage}\n"
@@ -518,7 +526,7 @@ class DataCollector(private val context: Context) {
         latestTimeStamp = timeStamp
         logStreams[StreamType.TEMPERATURE]?.let { stream ->
             if (!stream.isStarted()) {
-                val headerLine = "TIMESTAMP TEMPERATURE(Celsius)\n"
+                val headerLine = "$DEVICE_TIMESTAMP_LABEL TEMPERATURE(Celsius)\n"
                 stream.write(headerLine)
             }
             val logLine = "$timeStamp $temperature\n"
@@ -531,14 +539,57 @@ class DataCollector(private val context: Context) {
         latestTimeStamp = timeStamp
         logStreams[StreamType.SKIN_TEMPERATURE]?.let { stream ->
             if (!stream.isStarted()) {
-                val headerLine = "TIMESTAMP SKIN TEMPERATURE(Celsius)\n"
+                val headerLine = "$DEVICE_TIMESTAMP_LABEL SKIN_TEMPERATURE(Celsius)\n"
                 stream.write(headerLine)
             }
             val logLine = "$timeStamp $temperature\n"
             stream.write(logLine)
         }
+
     }
 
+    @Throws(IOException::class)
+    fun startDerivedAccLog(logId: String, startTime: LocalDateTime = LocalDateTime.now()) {
+        if (!logStreams.containsKey(StreamType.DERIVED_ACC)) {
+            logStreams[StreamType.DERIVED_ACC] = startNewLogWithTag("ACC_DERIVED", logId, startTime)
+        }
+    }
+
+    /**
+     * Write one derived sample to the output file.
+     * The header is written on the first call and reflects all active methods.
+     * Component methods (e.g. DOWNSAMPLE, MIN, MAX, AVG) produce _X _Y _Z columns;
+     * scalar methods (e.g. NORM, STD_OF_NORMS) produce a single column.
+     * Column label abbreviations are defined by [PolarDerivedMeasurementMethod.csvLabel].
+     */
+    @Throws(IOException::class)
+    fun logDerivedSample(sample: com.polar.sdk.api.model.PolarDerivedSample) {
+        latestTimeStamp = sample.timeStamp
+        logStreams[StreamType.DERIVED_ACC]?.let { stream ->
+            val sortedMethods = sample.methodValues.entries
+                .sortedBy { it.key.id }
+            if (!stream.isStarted()) {
+                val header = buildString {
+                    append(DEVICE_TIMESTAMP_LABEL)
+                    for ((method, values) in sortedMethods) {
+                        if (values.size >= 3) append(" ${method.csvLabel}_X ${method.csvLabel}_Y ${method.csvLabel}_Z")
+                        else append(" ${method.csvLabel}")
+                    }
+                    append("\n")
+                }
+                stream.write(header)
+            }
+            val line = buildString {
+                append(sample.timeStamp)
+                for ((_, values) in sortedMethods) {
+                    if (values.size >= 3) append(" ${values[0]} ${values[1]} ${values[2]}")
+                    else append(" ${values[0]}")
+                }
+                append("\n")
+            }
+            stream.write(line)
+        }
+    }
     @Throws(IOException::class)
     fun marker(deviceId: String, isStartMark: Boolean, timeStamp: Long = 0L) {
         val markerStamp = if (timeStamp == 0L) {
@@ -594,7 +645,8 @@ class DataCollector(private val context: Context) {
         LOCATION_SUMMARY,
         LOCATION_NMEA,
         TEMPERATURE,
-        SKIN_TEMPERATURE
+        SKIN_TEMPERATURE,
+        DERIVED_ACC
     }
 
 }

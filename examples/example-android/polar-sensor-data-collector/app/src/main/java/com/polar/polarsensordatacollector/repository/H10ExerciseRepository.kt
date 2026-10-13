@@ -1,14 +1,16 @@
 package com.polar.polarsensordatacollector.repository
 
 import android.util.Log
+import androidx.core.util.Pair
 import com.polar.sdk.api.PolarH10OfflineExerciseApi
 import com.polar.sdk.api.model.PolarExerciseData
 import com.polar.sdk.api.model.PolarExerciseEntry
 import com.polar.sdk.impl.BDBleApiImpl
-import io.reactivex.rxjava3.core.Completable
-import io.reactivex.rxjava3.core.Single
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.toList
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -24,80 +26,94 @@ class H10ExerciseRepository @Inject constructor(
     private val _featureState = MutableStateFlow(H10RecordingFeature())
     val featureState: StateFlow<H10RecordingFeature> = _featureState
 
-    fun updateStatus(isSupported: Boolean, isEnabled: Boolean) {
+    fun updateStatus(isSupported: Boolean, isOngoing: Boolean) {
         _featureState.value = _featureState.value.copy(
             isSupported = isSupported,
-            isEnabled = isEnabled
+            isOngoing = isOngoing
         )
     }
 
-    fun updateRecordingEnabled(isEnabled: Boolean) {
-        _featureState.value = _featureState.value.copy(isEnabled = isEnabled)
+    fun updateRecordingEnabled(isOngoing: Boolean) {
+        _featureState.value = _featureState.value.copy(isOngoing = isOngoing)
     }
 
-    fun requestRecordingStatus(deviceId: String): Single<Pair<Boolean, String>> {
-        return api.requestRecordingStatus(deviceId)
-            .map { Pair(it.first, it.second) }
+    suspend fun requestRecordingStatus(identifier: String): PolarH10OfflineExerciseApi.PolarRecordingStatus {
+        return api.requestRecordingStatus(identifier)
     }
 
-    fun listExercises(deviceId: String): Single<List<PolarExerciseEntry>> {
-        return api.listExercises(deviceId)
-            .toList()
-            .doOnError { e ->
+    suspend fun listExercises(identifier: String): List<PolarExerciseEntry> {
+        return try {
+            api.listExercises(identifier)
+                .catch { e -> Log.e(TAG, "listExercises() failed", e); throw e }
+                .toList()
+        } catch (e: Exception) {
+            Log.e(TAG, "listExercises() failed", e)
+            throw e
+        }
+    }
+
+    fun listExercisesAsFlow(identifier: String): Flow<PolarExerciseEntry> {
+        return api.listExercises(identifier)
+            .catch { e ->
                 Log.e(TAG, "listExercises() failed", e)
+                throw e
             }
     }
 
-    fun readExercise(
-        deviceId: String,
+    suspend fun readExercise(
+        identifier: String,
         entry: PolarExerciseEntry
-    ): Single<PolarExerciseData> {
-        return api.fetchExercise(deviceId, entry)
-            .doOnError { e ->
-                Log.e(TAG, "readExercise() failed", e)
-            }
+    ): PolarExerciseData {
+        return try {
+            api.fetchExercise(identifier, entry)
+        } catch (e: Exception) {
+            Log.e(TAG, "readExercise() failed", e)
+            throw e
+        }
     }
 
-    fun removeExercise(
-        deviceId: String,
+    suspend fun removeExercise(
+        identifier: String,
         entry: PolarExerciseEntry
-    ): Completable {
-        return api.removeExercise(deviceId, entry)
-            .doOnError { e ->
-                Log.e(TAG, "removeExercise() failed", e)
-            }
+    ) {
+        try {
+            api.removeExercise(identifier, entry)
+        } catch (e: Exception) {
+            Log.e(TAG, "removeExercise() failed", e)
+            throw e
+        }
     }
 
-    fun startRecording(
-        deviceId: String,
+    suspend fun startRecording(
+        identifier: String,
         exerciseId: String
-    ): Completable {
-        return api.startRecording(
-            deviceId,
-            exerciseId,
-            PolarH10OfflineExerciseApi.RecordingInterval.INTERVAL_1S,
-            PolarH10OfflineExerciseApi.SampleType.HR
-        )
-            .doOnComplete {
-                Log.d(TAG, "Recording started for $deviceId, exerciseId=$exerciseId")
-            }
-            .doOnError { e ->
-                Log.e(TAG, "startRecording() failed", e)
-            }
+    ) {
+        try {
+            api.startRecording(
+                identifier,
+                exerciseId,
+                PolarH10OfflineExerciseApi.RecordingInterval.INTERVAL_1S,
+                sampleType = PolarH10OfflineExerciseApi.SampleType.HR
+            )
+            Log.d(TAG, "Recording started for $identifier, exerciseId=$exerciseId")
+        } catch (e: Exception) {
+            Log.e(TAG, "startRecording() failed", e)
+            throw e
+        }
     }
 
-    fun stopRecording(deviceId: String): Completable {
-        return api.stopRecording(deviceId)
-            .doOnComplete {
-                Log.d(TAG, "Recording stopped for $deviceId")
-            }
-            .doOnError { e ->
-                Log.e(TAG, "stopRecording() failed", e)
-            }
+    suspend fun stopRecording(identifier: String) {
+        try {
+            api.stopRecording(identifier)
+            Log.d(TAG, "Recording stopped for $identifier")
+        } catch (e: Exception) {
+            Log.e(TAG, "stopRecording() failed", e)
+            throw e
+        }
     }
 }
 
 data class H10RecordingFeature(
     val isSupported: Boolean = false,
-    val isEnabled: Boolean = false
+    val isOngoing: Boolean = false
 )

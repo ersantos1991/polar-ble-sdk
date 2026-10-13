@@ -7,8 +7,9 @@ import com.polar.androidcommunications.api.ble.model.gatt.BleGattBase
 import com.polar.androidcommunications.api.ble.model.gatt.client.BleHrClient
 import com.polar.androidcommunications.api.ble.model.gatt.client.BleHrClient.Companion.HR_MEASUREMENT
 import com.polar.androidcommunications.api.ble.model.gatt.client.BleHrClient.Companion.HR_SERVICE
+import com.polar.androidcommunications.api.ble.model.gatt.client.BleMdsClient
 import com.polar.androidcommunications.api.ble.model.gatt.client.BlePfcClient
-import com.polar.androidcommunications.api.ble.model.gatt.client.BlePfcClient.PFC_SERVICE
+import com.polar.androidcommunications.api.ble.model.gatt.client.BlePfcClient.Companion.PFC_SERVICE
 import com.polar.androidcommunications.api.ble.model.gatt.client.pmd.BlePMDClient
 import com.polar.androidcommunications.api.ble.model.gatt.client.psftp.BlePsFtpClient
 import com.polar.androidcommunications.api.ble.model.gatt.client.psftp.BlePsFtpUtils
@@ -66,6 +67,16 @@ internal object PolarServiceClientUtils {
     }
 
     @Throws(Throwable::class)
+    internal fun sessionMdsClientReady(identifier: String, listener: BleDeviceListener?): BleDeviceSession {
+        val session =  sessionServiceReady(identifier, BleMdsClient.MDS_SERVICE, listener)
+        val client = session.fetchClient(BleMdsClient.MDS_SERVICE) as BleMdsClient? ?: throw PolarServiceNotAvailable()
+        if (client.isServiceDiscovered) {
+            return session
+        }
+        throw PolarNotificationNotEnabled()
+    }
+
+    @Throws(Throwable::class)
     internal fun sessionServiceReady(identifier: String, service: UUID, listener: BleDeviceListener?): BleDeviceSession {
         val session = fetchSession(identifier, listener)
             ?: throw PolarDeviceNotFound()
@@ -97,13 +108,31 @@ internal object PolarServiceClientUtils {
         throw PolarInvalidArgument()
     }
 
+    internal fun getRSSIValue(deviceId: String, listener: BleDeviceListener?): Int {
+        listener?.let {
+            val sessions = it.deviceSessions()
+            if (sessions != null) {
+                for (session in sessions) {
+                    if (session != null) {
+                        if (session.advertisementContent.polarDeviceId == deviceId) {
+                            return session.rssi
+                        }
+                    }
+                }
+            }
+        }
+        return -1
+    }
+
     private fun sessionByDeviceId(deviceId: String, listener: BleDeviceListener?): BleDeviceSession? {
         listener?.let {
             val sessions = it.deviceSessions()
             if (sessions != null) {
                 for (session in sessions) {
-                    if (session.advertisementContent.polarDeviceId == deviceId) {
-                        return session
+                    if (session != null) {
+                        if (session.advertisementContent.polarDeviceId == deviceId) {
+                            return session
+                        }
                     }
                 }
             }
@@ -116,8 +145,10 @@ internal object PolarServiceClientUtils {
             val sessions = it.deviceSessions()
             if (sessions != null) {
                 for (session in sessions) {
-                    if (session.address == address) {
-                        return session
+                    if (session != null) {
+                        if (session.address == address) {
+                            return session
+                        }
                     }
                 }
             }

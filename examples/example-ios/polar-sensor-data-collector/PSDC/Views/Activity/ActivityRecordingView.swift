@@ -24,7 +24,10 @@ struct ActivityRecordingView: View {
     @State private var activeTimeTitle = "Get active time data"
     @State private var activitySamplesTitle = "Get activity samples data"
     @State private var dailySummaryTitle = "Get daily summary"
-    
+    @State private var spo2TestTitle = "Get SpO2 test data"
+    @State private var showSpo2DatePickerView = false
+    @State private var showSpo2ActivityView = false
+
     var body: some View {
         if case .connected = bleSdkManager.deviceConnectionState,
            bleSdkManager.deviceInfoFeature.isSupported {
@@ -32,18 +35,24 @@ struct ActivityRecordingView: View {
                 VStack {
                     VStack {
                         Text(sleepRecordingStateText)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                Task {
+                                    await bleSdkManager.getSleepRecordingStatus()
+                                }
+                            }
                         Button("Stop sleep recording",
                                action: {
                             Task {
                                 bleSdkManager.sleepRecordingStop()
                             }
                         }).buttonStyle(SecondaryButtonStyle(buttonState: ButtonState.released))
-                            .opacity(bleSdkManager.sleepRecordingFeature.sleepRecordingEnabled ? 1.0 : 0.5)
-                            .disabled(bleSdkManager.sleepRecordingFeature.sleepRecordingEnabledAvailable == false || bleSdkManager.sleepRecordingFeature.sleepRecordingEnabled == false)
+                            .opacity(bleSdkManager.sleepRecordingFeature.status == .enabled ? 1.0 : 0.5)
+                            .disabled(bleSdkManager.sleepRecordingFeature.status != .enabled)
                         Divider()
                     }
                     .task {
-                       bleSdkManager.observeSleepRecordingState()
+                       await bleSdkManager.getSleepRecordingStatus()
                     }
                     
                     Button(sleepTextTitle) {
@@ -211,6 +220,20 @@ struct ActivityRecordingView: View {
                     .sheet(isPresented: $showTrainingSessionView) {
                         TrainingSessionListView().environmentObject(bleSdkManager)
                     }
+
+                    Button(spo2TestTitle) {
+                        showSpo2DatePickerView = true
+                        showSpo2ActivityView = false
+                        bleSdkManager.activityRecordingData.activityType = PolarActivityDataType.SPO2_TEST
+                        bleSdkManager.activityRecordingData.loadingState = ActivityRecordingDataLoadingState.inProgress
+                    }.alignmentGuide(.leading) { d in d[.leading] }
+                    .sheet(isPresented: $showSpo2DatePickerView) {
+                        ActivityDatePickerView(isPresented: $showSpo2DatePickerView, showActivityView: $showSpo2ActivityView)
+                    }
+                    .sheet(isPresented: $showSpo2ActivityView) {
+                        ActivityRecordingDetailsView(isPresented: $showSpo2ActivityView)
+                            .environmentObject(bleSdkManager)
+                    }
                 }
                 .padding(.vertical, 20)
                 .buttonStyle(SecondaryButtonStyle(buttonState: ButtonState.released))
@@ -219,11 +242,14 @@ struct ActivityRecordingView: View {
     }
         
     var sleepRecordingStateText: String {
-        if bleSdkManager.sleepRecordingFeature.sleepRecordingEnabledAvailable {
-            let onOrOff = bleSdkManager.sleepRecordingFeature.sleepRecordingEnabled ? "on" : "off"
-            return "Sleep recording is \(onOrOff)"
-        } else {
+        guard let status = bleSdkManager.sleepRecordingFeature.status else {
             return "Sleep recording control not available"
+        }
+        switch status {
+        case .enabled: return "Sleep recording is on"
+        case .disabled: return "Sleep recording is off"
+        case .unknown: return "Sleep recording state is unknown"
+        @unknown default: return "Sleep recording state is unknown"
         }
     }
 }

@@ -1,7 +1,6 @@
 
 import UIKit
 import PolarBleSdk
-import RxSwift
 import CoreBluetooth
 
 class ViewController: UIViewController,
@@ -11,10 +10,6 @@ class ViewController: UIViewController,
                       PolarBleApiDeviceInfoObserver,
                       PolarBleApiDeviceFeaturesObserver,
                       PolarBleApiLogger {
-    func deviceDisconnected(_ identifier: PolarBleSdk.PolarDeviceInfo, pairingError: Bool) {
-        return
-    }
-    
     func hrValueReceived(_ identifier: String, data: (hr: UInt8, rrs: [Int], rrsMs: [Int], contact: Bool, contactSupported: Bool)) {
         return
     }
@@ -36,9 +31,9 @@ class ViewController: UIViewController,
     @IBOutlet weak var accSelectButton: UIButton!
     @IBOutlet weak var connectionsButton: UIButton!
     @IBOutlet weak var disconnectButton: UIButton!
-    @IBOutlet weak var sensorDatalogButton: UIButton!
+    @IBOutlet weak var loggingSettingsButton: UIButton!
     
-    var connectedDevices: [(PolarDeviceInfo, Disposable?)] = [] {
+    var connectedDevices: [PolarDeviceInfo] = [] {
         didSet {
             disconnectButton.isEnabled = !connectedDevices.isEmpty
         }
@@ -58,11 +53,10 @@ class ViewController: UIViewController,
     var previousPpiData: PolarPpiData?
     var previousEcgData: PolarEcgData?
     let collector = DataCollector()
-    var timer: Disposable?
-    var logConfig: SDLogConfig?
-    let disposeBag = DisposeBag()
-    var supportsSdLog = false
-    
+    var elapsedTimer: DispatchSourceTimer?
+    var logConfig: LogConfig?
+    var isLogConfigSupported = false
+
     @IBOutlet weak var ecgSwitch: UISwitch!
     @IBOutlet weak var ppiSwitch: UISwitch!
     @IBOutlet weak var ppgSwitch: UISwitch!
@@ -95,9 +89,9 @@ class ViewController: UIViewController,
         accSelectButton.clipsToBounds = true
         ppgSelectButton.layer.cornerRadius = 10
         ppgSelectButton.clipsToBounds = true
-        sensorDatalogButton.layer.cornerRadius = 10
-        sensorDatalogButton.clipsToBounds = true
-        sensorDatalogButton.isEnabled = false
+        loggingSettingsButton.layer.cornerRadius = 10
+        loggingSettingsButton.clipsToBounds = true
+        loggingSettingsButton.isEnabled = false
         api.observer = self
         api.deviceFeaturesObserver = self
         api.deviceHrObserver = self
@@ -130,8 +124,9 @@ class ViewController: UIViewController,
         self.batteryLevel.text = "-"
         self.firmwareVersion.text = "-"
         
-        if let device = selectedDevice, let index = connectedDevices.firstIndex(where: { $0.0.deviceId == device.deviceId }) {
-            connectedDevices[index].1?.dispose()
+        if let device = selectedDevice, let index = connectedDevices.firstIndex(where: { $0.deviceId == device.deviceId }) {
+            elapsedTimer?.cancel()
+            elapsedTimer = nil
             connectedDevices.remove(at: index)
         }
         selectedDevice = nil
@@ -139,12 +134,12 @@ class ViewController: UIViewController,
     
     @IBAction func sensorSettings(_ sender: Any) {
         if selectedDevice == nil {
-            sensorDatalogButton.isEnabled = false
+            loggingSettingsButton.isEnabled = false
         } else {
             checkLogConfigAvailability()
-            if self.supportsSdLog {
-                let storyboard = UIStoryboard(name: "SensorDatalogSettingsPopup", bundle: nil)
-                let datalogSettingsController = storyboard.instantiateViewController(withIdentifier: "SensorDatalogSettingsViewController") as! SensorDatalogSettingsViewController
+            if self.isLogConfigSupported {
+                let storyboard = UIStoryboard(name: "LoggingSettingsPopup", bundle: nil)
+                let datalogSettingsController = storyboard.instantiateViewController(withIdentifier: "LoggingSettingsViewController") as! LoggingSettingsViewController
                 datalogSettingsController.delegate = self
                 datalogSettingsController.api = api
                 datalogSettingsController.deviceId = self.selectedDevice!.deviceId
@@ -152,8 +147,8 @@ class ViewController: UIViewController,
                 self.modalPresentationStyle = UIModalPresentationStyle.currentContext
                 self.present(datalogSettingsController, animated: true, completion: nil)
             } else {
-                sensorDatalogButton.isEnabled = false
-                sensorDatalogButton.setTitle("Sensor Datalog not supported", for: .disabled)
+                loggingSettingsButton.isEnabled = false
+                loggingSettingsButton.setTitle("Logging settings not supported", for: .disabled)
             }
         }
     }
@@ -165,28 +160,27 @@ class ViewController: UIViewController,
     func setDevice(_ device: PolarDeviceInfo) {
         print("device set \(device.name)")
         selectedDevice = device
-        connectedDevices.append((device, nil))
+        connectedDevices.append(device)
         self.connectionsButton.setTitle("CONNECTIONS", for: .normal)
         do{
             try api.connectToDevice(device.deviceId)
-            sensorDatalogButton.isEnabled = true
+            loggingSettingsButton.isEnabled = true
         } catch let err {
             print("connect error: \(err)")
         }
     }
     
     func checkLogConfigAvailability() {
-        api.getSDLogConfiguration(self.selectedDevice!.deviceId)
-            .observe(on: MainScheduler.instance)
-            .subscribe{ [self] e in
-                switch e {
-                case .success(_):
-                    self.supportsSdLog = true
-                case .failure(let err):
-                    self.supportsSdLog = false
-                    self.dismiss(animated: false)
-                }
-            }.disposed(by: disposeBag)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                _ = try await api.getLogConfig(selectedDevice!.deviceId)
+                isLogConfigSupported = true
+            } catch {
+                isLogConfigSupported = false
+                dismiss(animated: false)
+            }
+        }
     }
     
     @IBAction func ppgSelection(_ sender: Any) {
@@ -199,38 +193,33 @@ class ViewController: UIViewController,
         accSelectButton.setTitle(accSelected ? "User selects" : "ACC default max", for: .normal)
     }
     
-    func showSettingsSelection(_ title: String, settings: Set<UInt16>) -> Single<UInt16> {
+    func showSettingsSelection(_ title: String, settings: Set<UInt16>) async -> UInt16 {
         let storyboard = UIStoryboard(name: "SensorSettingsDialog", bundle: nil)
         let secondViewController = storyboard.instantiateViewController(withIdentifier: "SensorSettingsDialogViewController") as! SensorSettingsDialogViewController
         navigationController?.pushViewController(secondViewController, animated: true)
         self.modalPresentationStyle = UIModalPresentationStyle.currentContext
         self.present(secondViewController, animated: true, completion: nil)
-        return secondViewController.start(title, set: settings)
+        return await secondViewController.start(title, set: settings)
     }
 
     func startTimer(for device: PolarDeviceInfo) {
-        let timer = Observable<Int>
-            .interval(RxTimeInterval.seconds(1), scheduler: MainScheduler.instance)
-            .observe(on: MainScheduler.instance)
-            .subscribe { e in
-                switch e {
-                case .next(let time):
-                    let hours = (Int) (time / 3600)
-                    let minutes = (Int) (time/60 % 60)
-                    let seconds = (Int) (time % 60)
-                    if let selectedDevice = self.selectedDevice, selectedDevice.deviceId == device.deviceId {
-                        self.deviceState.text = String(format: "%02d:%02d:%02d", hours, minutes, seconds)
-                    }
-                case .completed:
-                    break
-                case .error(let err):
-                    print("timer failed: \(err)")
-                }
+        elapsedTimer?.cancel()
+        var elapsed = 0
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now(), repeating: .seconds(1))
+        timer.setEventHandler { [weak self] in
+            elapsed += 1
+            let hours = elapsed / 3600
+            let minutes = elapsed / 60 % 60
+            let seconds = elapsed % 60
+            if let selectedDevice = self?.selectedDevice, selectedDevice.deviceId == device.deviceId {
+                self?.deviceState.text = String(format: "%02d:%02d:%02d", hours, minutes, seconds)
             }
-        if let index = connectedDevices.firstIndex(where: { $0.0.deviceId == device.deviceId && $0.0.address == device.address }) {
-            connectedDevices[index].1 = timer
-        } else {
-            connectedDevices.append((device, timer))
+        }
+        elapsedTimer = timer
+        timer.resume()
+        if !connectedDevices.contains(where: { $0.deviceId == device.deviceId }) {
+            connectedDevices.append(device)
         }
     }
     
@@ -241,34 +230,30 @@ class ViewController: UIViewController,
     
     func ecgFeatureReady(_ identifier: String) {
         if ecgSwitch.isOn {
-            _ = api.requestStreamSettings(identifier, feature: PolarDeviceDataType.ecg)
-                .asObservable()
-                .flatMap({ (settings) -> Observable<PolarEcgData> in
-                    self.collector.startEcgStream(self.selectedDevice!.name)
-                    return self.api.startEcgStreaming(identifier, settings: settings.maxSettings())
-                })
-                .observe(on: MainScheduler.instance).subscribe{ e in
-                    switch e {
-                    case .completed:
-                        break
-                    case .next(let data):
-                        if self.previousEcgData != nil {
-                            let delta = (data.timeStamp - self.previousEcgData!.timeStamp) / UInt64(data.samples.count)
-                            var base = self.previousEcgData!.timeStamp - (UInt64(self.previousEcgData!.samples.count-1)*delta)
-                            self.previousEcgData!.samples.forEach({ (arg0) in
-                                self.collector.streamEcg(base, ecg: arg0.voltage)
-                                base += delta
-                            })
+            Task { [weak self] in
+                guard let self else { return }
+                do {
+                    let settings = try await api.requestStreamSettings(identifier, feature: PolarDeviceDataType.ecg)
+                    await MainActor.run { collector.startEcgStream(selectedDevice!.name) }
+                    for try await data in api.startEcgStreaming(identifier, settings: settings.maxSettings()) {
+                        await MainActor.run {
+                            if let prevData = previousEcgData {
+                                let delta = (data.timeStamp - prevData.timeStamp) / UInt64(data.samples.count)
+                                var base = prevData.timeStamp - (UInt64(prevData.samples.count-1)*delta)
+                                prevData.samples.forEach { arg0 in
+                                    collector.streamEcg(base, ecg: arg0.voltage)
+                                    base += delta
+                                }
+                            }
+                            previousEcgData = data
+                            for sample in data.samples { ecg.text = "\(sample)" }
                         }
-                        self.previousEcgData = data
-                        for sample in data.samples {
-                            self.ecg.text = "\(sample)"
-                        }
-                    case .error(let err):
-                        print("ECG error: \(err)")
-                        self.ecg.text = "-"
                     }
+                } catch {
+                    print("ECG error: \(error)")
+                    await MainActor.run { self.ecg.text = "-" }
                 }
+            }
         }
     }
     
@@ -314,7 +299,7 @@ class ViewController: UIViewController,
                                 self.accZ.text = "\(z)"
                             })
                         case .error(let err):
-                            NSLog("ACC error: \(err)")
+                            AppLogger.log("ACC error: \(err)")
                             self.accX.text = "-"
                             self.accY.text = "-"
                             self.accZ.text = "-"
@@ -372,7 +357,7 @@ class ViewController: UIViewController,
                             self.ppg2.text = "\(item.ppg2)"
                         }
                     case .error(let err):
-                        NSLog("PPG error: \(err)")
+                        AppLogger.log("PPG error: \(err)")
                         self.ppg0.text = "-"
                         self.ppg1.text = "-"
                         self.ppg2.text = "-"
@@ -386,30 +371,30 @@ class ViewController: UIViewController,
     func ohrPPIFeatureReady(_ identifier: String) {
         if ppiSwitch.isOn {
             collector.startPPIStream(selectedDevice!.name)
-            _ = api.startPpiStreaming(identifier)
-                .observe(on: MainScheduler.instance)
-                .subscribe{ e in
-                    switch e {
-                    case .completed:
-                        break
-                    case .error(let err):
-                        NSLog("PPI error: \(err)")
-                        self.ppi.text = "-"
-                    case .next(let data):
-                        if self.previousPpiData != nil {
-                            let delta = (data.timeStamp - self.previousPpiData!.timeStamp) / UInt64(data.samples.count)
-                            var base = self.previousPpiData!.timeStamp - (UInt64(self.previousPpiData!.samples.count-1)*delta)
-                            self.previousPpiData!.samples.forEach({ (arg0) in
-                                self.collector.streamPpi(base, ppi: arg0.ppInMs, errorEstimate: arg0.ppErrorEstimate, blocker: arg0.blockerBit, contact: arg0.skinContactStatus, contactSupported: arg0.skinContactSupported, hr: arg0.hr)
-                                base += delta
-                            })
-                        }
-                        self.previousPpiData = data
-                        for item in data.samples {
-                            self.ppi.text = "\(item.ppInMs)"
+            Task { [weak self] in
+                guard let self else { return }
+                do {
+                    for try await data in api.startPpiStreaming(identifier) {
+                        await MainActor.run {
+                            if let prevData = previousPpiData {
+                                let delta = (data.timeStamp - prevData.timeStamp) / UInt64(data.samples.count)
+                                var base = prevData.timeStamp - (UInt64(prevData.samples.count-1)*delta)
+                                prevData.samples.forEach { arg0 in
+                                    collector.streamPpi(base, ppi: arg0.ppInMs, errorEstimate: arg0.ppErrorEstimate, blocker: arg0.blockerBit, contact: arg0.skinContactStatus, contactSupported: arg0.skinContactSupported, hr: arg0.hr)
+                                    base += delta
+                                }
+                            }
+                            previousPpiData = data
+                            for item in data.samples {
+                                ppi.text = "\(item.ppInMs)"
+                            }
                         }
                     }
+                } catch {
+                    AppLogger.log("PPI error: \(error)")
+                    await MainActor.run { self.ppi.text = "-" }
                 }
+            }
         }
     }
     
@@ -419,30 +404,25 @@ class ViewController: UIViewController,
     
     func biozFeatureReady(_ identifier: String) {
         if self.ppgSwitch.isOn {
-            _ = api.requestStreamSettings(identifier, feature: PolarDeviceDataType.ppg)
-                .asObservable()
-                .flatMap({ (settings) -> Observable<PolarPpgData> in
-                    self.api.startPpgStreaming(identifier, settings: settings.maxSettings())
-                })
-                .observe(on: MainScheduler.instance)
-                .subscribe { e in
-                    switch e {
-                    case .completed:
-                        break
-                    case .error(let err):
-                        print("BIOZ error: \(err)")
-                        self.bioz.text = "-"
-                    case .next(let value):
-                        value.samples.forEach({ (bioz) in
-                            self.bioz.text = "\(bioz)"
-                        })
+            Task { [weak self] in
+                guard let self else { return }
+                do {
+                    let settings = try await api.requestStreamSettings(identifier, feature: PolarDeviceDataType.ppg)
+                    for try await value in api.startPpgStreaming(identifier, settings: settings.maxSettings()) {
+                        await MainActor.run {
+                            value.samples.forEach { bioz in self.bioz.text = "\(bioz)" }
+                        }
                     }
+                } catch {
+                    print("BIOZ error: \(error)")
+                    await MainActor.run { self.bioz.text = "-" }
                 }
+            }
         }
     }
     
     func message(_ str: String) {
-        NSLog(str)
+        AppLogger.log(str)
     }
     
     func deviceConnecting(_ identifier: PolarDeviceInfo) {
@@ -452,7 +432,7 @@ class ViewController: UIViewController,
     
     func deviceConnected(_ identifier: PolarDeviceInfo) {
         print("connected")
-        let deviceIds = connectedDevices.map { $0.0.deviceId }
+        let deviceIds = connectedDevices.map { $0.deviceId }
         let connectedDevicesText = "CONNECTED: \(deviceIds.joined(separator: ", "))"
         self.btState.text = connectedDevicesText
         selectedDevice = identifier
@@ -464,9 +444,9 @@ class ViewController: UIViewController,
         self.connectionsButton.setTitle("START", for: .normal)
         hr.text = "-"
         rrsMs.text = "-"
-        if let index = connectedDevices.firstIndex(where: { $0.0.deviceId == identifier.deviceId }) {
-            print("dispose timer")
-            connectedDevices[index].1?.dispose()
+        if let index = connectedDevices.firstIndex(where: { $0.deviceId == identifier.deviceId }) {
+            elapsedTimer?.cancel()
+            elapsedTimer = nil
             connectedDevices.remove(at: index)
         }
         if let newDevice = connectedDevices.first?.0 {
@@ -477,7 +457,7 @@ class ViewController: UIViewController,
         if (connectedDevices.isEmpty) {
             self.btState.text = "NO DEVICES CONNECTED"
         } else {
-            let deviceIds = connectedDevices.map { $0.0.deviceId }
+            let deviceIds = connectedDevices.map { $0.deviceId }
             let connectedDevicesText = "CONNECTED: \(deviceIds.joined(separator: ", "))"
             self.btState.text = connectedDevicesText
         }

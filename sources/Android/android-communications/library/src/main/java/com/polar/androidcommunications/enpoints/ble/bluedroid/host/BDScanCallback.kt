@@ -15,30 +15,30 @@ import com.polar.androidcommunications.api.ble.model.gatt.client.BleHrClient
 import com.polar.androidcommunications.api.ble.model.gatt.client.psftp.BlePsFtpUtils
 import com.polar.androidcommunications.common.ble.AndroidBuildUtils.Companion.getBuildVersion
 import com.polar.androidcommunications.common.ble.BleUtils.EVENT_TYPE
-import io.reactivex.rxjava3.android.schedulers.AndroidSchedulers
-import io.reactivex.rxjava3.core.Observable
-import io.reactivex.rxjava3.core.Scheduler
-import io.reactivex.rxjava3.disposables.Disposable
-import io.reactivex.rxjava3.schedulers.Schedulers
-import java.util.concurrent.CopyOnWriteArrayList
-import java.util.concurrent.TimeUnit
-import java.util.function.Predicate
-import kotlin.streams.toList
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import java.util.concurrent.ConcurrentLinkedQueue
 
 internal class BDScanCallback(
-    context: Context,
+    @Suppress("UNUSED_PARAMETER") context: Context,
     private val bluetoothAdapter: BluetoothAdapter,
-    private val scanCallbackInterface: BDScanCallbackInterface
+    private val scanCallbackInterface: BDScanCallbackInterface,
+    private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO)
 ) {
     companion object {
         private const val TAG = "BDScanCallback"
         private const val POLAR_MANUFACTURER_ID = 0x006b
-
-        // scan window limit, for android's "is scanning too frequently"
         private const val SCAN_WINDOW_LIMIT = 30000
+        private const val OPPORTUNISTIC_RESTART_INTERVAL_MS = 30L * 60L * 1000L // 30 minutes
+        private const val INITIAL_BACKOFF_MS = 1_000L
+        private const val MAX_BACKOFF_MS = 60_000L
+        private const val MAX_SCAN_FAILURES = 5
     }
 
-    private var scanFilter: List<ScanFilter>? = null
+    private var scanFilter: List<ScanFilter?>? = null
 
     init {
         val defaultFilter: MutableList<ScanFilter> = ArrayList()
@@ -49,39 +49,33 @@ internal class BDScanCallback(
     }
 
     private enum class ScanAction {
-        ENTRY,
-        EXIT,
-        CLIENT_START_SCAN,
-        CLIENT_REMOVED,
-        ADMIN_START_SCAN,
-        ADMIN_STOP_SCAN,
-        BLE_POWER_OFF,
-        BLE_POWER_ON
+        ENTRY, EXIT, CLIENT_START_SCAN, CLIENT_REMOVED,
+        ADMIN_START_SCAN, ADMIN_STOP_SCAN, BLE_POWER_OFF, BLE_POWER_ON
     }
 
     private enum class ScannerState {
-        IDLE,
-        STOPPED,
-        SCANNING
+        IDLE, STOPPED, SCANNING
     }
 
-    private val scanPool: MutableList<Long> = CopyOnWriteArrayList()
-    private val delayScheduler: Scheduler = AndroidSchedulers.from(context.mainLooper)
+    private val scanPool: ConcurrentLinkedQueue<Long> = ConcurrentLinkedQueue()
     private var state = ScannerState.IDLE
     var lowPowerEnabled = false
     var opportunistic = true
     private var adminStops = 0
 
-    private var delaySubscription: Disposable? = null
-    private var opportunisticScanTimer: Disposable? = null
+    private var delayJob: Job? = null
+    private var opportunisticScanJob: Job? = null
+    private var backoffJob: Job? = null
+    private var scanFailureCount = 0
+    private var isRecovering = false
 
     internal interface BDScanCallbackInterface {
-        fun deviceDiscovered(device: BluetoothDevice?, rssi: Int, scanRecord: ByteArray, type: EVENT_TYPE)
+        fun deviceDiscovered(device: BluetoothDevice, rssi: Int, scanRecord: ByteArray, type: EVENT_TYPE)
         fun scanStartError(error: String)
         fun isScanningNeeded(): Boolean
     }
 
-    fun setScanFilters(filters: List<ScanFilter>?) {
+    fun setScanFilters(filters: List<ScanFilter?>?) {
         stopScan()
         this.scanFilter = filters
         startScan()
@@ -116,14 +110,20 @@ internal class BDScanCallback(
         commandState(ScanAction.BLE_POWER_OFF)
     }
 
-    private val leScanCallback: ScanCallback = object : ScanCallback() {
+    private var leScanCallback: ScanCallback = createScanCallback()
+
+    private fun createScanCallback(): ScanCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             super.onScanResult(callbackType, result)
+            scanFailureCount = 0
+            isRecovering = false
             val bytes = result.scanRecord?.bytes ?: byteArrayOf()
             scanCallbackInterface.deviceDiscovered(result.device, result.rssi, bytes, fetchAdvType(result))
         }
 
         override fun onBatchScanResults(results: List<ScanResult>) {
+            scanFailureCount = 0
+            isRecovering = false
             for (result in results) {
                 val bytes = result.scanRecord?.bytes ?: byteArrayOf()
                 scanCallbackInterface.deviceDiscovered(result.device, result.rssi, bytes, fetchAdvType(result))
@@ -131,24 +131,49 @@ internal class BDScanCallback(
         }
 
         override fun onScanFailed(errorCode: Int) {
-            val scanFailureString = "Scan start failed to ScanCallback errorCode: $errorCode"
-            BleLogger.e(TAG, scanFailureString)
-            scanCallbackInterface.scanStartError(scanFailureString)
+            if (errorCode == SCAN_FAILED_ALREADY_STARTED) {
+                BleLogger.d(TAG, "onScanFailed SCAN_FAILED_ALREADY_STARTED (1) - benign race, ignoring")
+                return
+            }
+            BleLogger.e(TAG, "Scan start failed errorCode: $errorCode - starting internal recovery")
+            isRecovering = true
+            backoffJob?.cancel()
+            backoffJob = scope.launch {
+                opportunisticScanJob?.cancel()
+                opportunisticScanJob = null
+                try {
+                    bluetoothAdapter.bluetoothLeScanner?.stopScan(leScanCallback)
+                } catch (ex: Exception) {
+                    BleLogger.e(TAG, "recovery stopScan failed: ${ex.localizedMessage}")
+                }
+                leScanCallback = createScanCallback()
+                delayJob?.cancel()
+                delayJob = null
+                state = ScannerState.IDLE
+                val backoffMs = minOf(INITIAL_BACKOFF_MS shl minOf(scanFailureCount, 5), MAX_BACKOFF_MS)
+                scanFailureCount++
+                BleLogger.d(TAG, "onScanFailed: scheduling recovery in ${backoffMs}ms (consecutive failures: $scanFailureCount)")
+                if (scanFailureCount == MAX_SCAN_FAILURES) {
+                    val msg = "Scan failed persistently ($scanFailureCount times, last errorCode=$errorCode). Scanner still retrying; user Bluetooth toggle recommended."
+                    BleLogger.e(TAG, msg)
+                    scanCallbackInterface.scanStartError(msg)
+                    scanFailureCount = 0
+                }
+                delay(backoffMs)
+                isRecovering = false
+                if (bluetoothAdapter.isEnabled && scanCallbackInterface.isScanningNeeded() && state == ScannerState.IDLE) {
+                    changeState(ScannerState.SCANNING)
+                }
+            }
         }
     }
 
     private fun commandState(action: ScanAction) {
         BleLogger.d(TAG, "commandState state:$state action: $action")
         when (state) {
-            ScannerState.IDLE -> {
-                scannerIdleState(action)
-            }
-            ScannerState.STOPPED -> {
-                scannerAdminState(action)
-            }
-            ScannerState.SCANNING -> {
-                scannerScanningState(action)
-            }
+            ScannerState.IDLE -> scannerIdleState(action)
+            ScannerState.STOPPED -> scannerAdminState(action)
+            ScannerState.SCANNING -> scannerScanningState(action)
         }
     }
 
@@ -161,7 +186,6 @@ internal class BDScanCallback(
     private fun scannerIdleState(action: ScanAction) {
         when (action) {
             ScanAction.ENTRY -> {
-                bluetoothAdapter.isEnabled
                 if (bluetoothAdapter.isEnabled && scanCallbackInterface.isScanningNeeded()) {
                     changeState(ScannerState.SCANNING)
                 }
@@ -169,9 +193,7 @@ internal class BDScanCallback(
             ScanAction.EXIT,
             ScanAction.ADMIN_START_SCAN,
             ScanAction.CLIENT_REMOVED,
-            ScanAction.BLE_POWER_OFF -> {
-                /* no-op */
-            }
+            ScanAction.BLE_POWER_OFF -> { /* no-op */ }
             ScanAction.CLIENT_START_SCAN -> {
                 if (bluetoothAdapter.isEnabled) {
                     if (scanCallbackInterface.isScanningNeeded()) {
@@ -186,7 +208,6 @@ internal class BDScanCallback(
             }
             ScanAction.BLE_POWER_ON -> {
                 if (scanCallbackInterface.isScanningNeeded()) {
-                    // if there is at least one client waiting
                     changeState(ScannerState.SCANNING)
                 }
             }
@@ -194,16 +215,10 @@ internal class BDScanCallback(
     }
 
     private fun scannerAdminState(action: ScanAction) {
-        // forced stopped state
         when (action) {
-            ScanAction.ENTRY -> {
-                adminStops = 1
-            }
-            ScanAction.EXIT -> {
-                adminStops = 0
-            }
+            ScanAction.ENTRY -> { adminStops = 1 }
+            ScanAction.EXIT -> { adminStops = 0 }
             ScanAction.ADMIN_START_SCAN -> {
-                // go through idle state back to scanning, if needed
                 --adminStops
                 if (adminStops <= 0) {
                     changeState(ScannerState.IDLE)
@@ -211,79 +226,55 @@ internal class BDScanCallback(
                     BleLogger.d(TAG, "Waiting admins to call start c: $adminStops")
                 }
             }
-            ScanAction.ADMIN_STOP_SCAN -> {
-                ++adminStops
-            }
-            ScanAction.BLE_POWER_OFF -> {
-                changeState(ScannerState.IDLE)
-            }
+            ScanAction.ADMIN_STOP_SCAN -> { ++adminStops }
+            ScanAction.BLE_POWER_OFF -> { changeState(ScannerState.IDLE) }
             ScanAction.CLIENT_REMOVED,
             ScanAction.CLIENT_START_SCAN,
-            ScanAction.BLE_POWER_ON -> {
-                /* no-op */
-            }
+            ScanAction.BLE_POWER_ON -> { /* no-op */ }
         }
     }
 
     private fun scannerScanningState(action: ScanAction) {
         when (action) {
-            ScanAction.ENTRY -> {
-                // start scanning
-                startScanning()
-            }
+            ScanAction.ENTRY -> { startScanning() }
             ScanAction.EXIT -> {
-                // stop scanning
                 stopScanning()
-                opportunisticScanTimer?.dispose()
-                opportunisticScanTimer = null
+                opportunisticScanJob?.cancel()
+                opportunisticScanJob = null
             }
             ScanAction.CLIENT_REMOVED -> {
                 if (!scanCallbackInterface.isScanningNeeded()) {
-                    // scanning is not needed anymore
                     changeState(ScannerState.IDLE)
                 }
             }
-            ScanAction.ADMIN_STOP_SCAN -> {
-                changeState(ScannerState.STOPPED)
-            }
-            ScanAction.BLE_POWER_OFF -> {
-                changeState(ScannerState.IDLE)
-            }
+            ScanAction.ADMIN_STOP_SCAN -> { changeState(ScannerState.STOPPED) }
+            ScanAction.BLE_POWER_OFF -> { changeState(ScannerState.IDLE) }
             ScanAction.BLE_POWER_ON -> {
-                // should not happen
                 BleLogger.e(TAG, "INCORRECT event received in scanning state: $action")
             }
             ScanAction.CLIENT_START_SCAN,
-            ScanAction.ADMIN_START_SCAN -> {
-                /* no-op */
-            }
+            ScanAction.ADMIN_START_SCAN -> { /* no-op */ }
         }
     }
 
     private fun startScanning() {
-
-        if (scanPool.isNotEmpty()) {
-            val elapsed = System.currentTimeMillis() - scanPool[0]
+        val firstTimestamp = scanPool.peek()
+        if (firstTimestamp != null) {
+            val elapsed = System.currentTimeMillis() - firstTimestamp
             if (scanPool.size > 3 && elapsed < SCAN_WINDOW_LIMIT) {
                 val sift = SCAN_WINDOW_LIMIT - elapsed + 200
-                BleLogger.d(TAG, "Prevent scanning too frequently delay: " + sift + "ms" + " elapsed: " + elapsed + "ms")
-                delaySubscription?.dispose()
-                delaySubscription = Observable.timer(sift, TimeUnit.MILLISECONDS)
-                    .subscribeOn(Schedulers.io())
-                    .observeOn(delayScheduler)
-                    .subscribe(
-                        { },
-                        { throwable: Throwable -> BleLogger.e(TAG, "timer failed: " + throwable.localizedMessage) },
-                        {
-                            BleLogger.d(TAG, "delayed scan starting")
-                            if (scanPool.isNotEmpty()) scanPool.removeAt(0)
-                            startLScan()
-                        })
+                BleLogger.d(TAG, "Prevent scanning too frequently delay: ${sift}ms elapsed: ${elapsed}ms")
+                delayJob?.cancel()
+                delayJob = scope.launch {
+                    delay(sift)
+                    BleLogger.d(TAG, "delayed scan starting")
+                    scanPool.poll()
+                    startLScan()
+                }
                 return
             }
         }
         BleLogger.d(TAG, "timestamps left: " + scanPool.size)
-
         startLScan()
     }
 
@@ -306,17 +297,19 @@ internal class BDScanCallback(
         try {
             callStartScanL(scanSettings)
             if (opportunistic) {
-                opportunisticScanTimer = Observable.interval(30, TimeUnit.MINUTES)
-                    .subscribeOn(Schedulers.io())
-                    .observeOn(delayScheduler)
-                    .subscribe(
-                        {
+                opportunisticScanJob?.cancel()
+                opportunisticScanJob = scope.launch {
+                    while (true) {
+                        delay(OPPORTUNISTIC_RESTART_INTERVAL_MS)
+                        if (isRecovering) {
+                            BleLogger.d(TAG, "Opportunistic restart skipped - recovery in progress")
+                        } else {
                             BleLogger.d(TAG, "RESTARTING scan to avoid opportunistic")
                             stopScanning()
                             callStartScanL(scanSettings)
-                        },
-                        { throwable: Throwable -> BleLogger.e(TAG, "TIMER failed: " + throwable.localizedMessage) }
-                    )
+                        }
+                    }
+                }
             }
             BleLogger.d(TAG, "Scan started <--")
         } catch (ex: NullPointerException) {
@@ -327,6 +320,11 @@ internal class BDScanCallback(
 
     @SuppressLint("MissingPermission", "NewApi")
     private fun callStartScanL(scanSettings: ScanSettings) {
+        // Record this attempt BEFORE the startScan call so that async onScanFailed
+        // failures are also counted toward the frequency throttle.
+        val now = System.currentTimeMillis()
+        scanPool.removeIf { now - it >= SCAN_WINDOW_LIMIT }
+        scanPool.add(now)
         try {
             bluetoothAdapter.bluetoothLeScanner.startScan(scanFilter, scanSettings, leScanCallback)
         } catch (e: Exception) {
@@ -334,26 +332,18 @@ internal class BDScanCallback(
             BleLogger.e(TAG, errorString)
             scanCallbackInterface.scanStartError(errorString)
             changeState(ScannerState.IDLE)
-            return
         }
-        val isWithinScanWindow = Predicate<Long> { aLong -> System.currentTimeMillis() - aLong < SCAN_WINDOW_LIMIT }
-
-        val scanWindowList = scanPool.stream()
-            .filter(isWithinScanWindow)
-            .toList()
-
-        scanPool.clear()
-        scanPool.addAll(scanWindowList)
-        scanPool.add(System.currentTimeMillis())
     }
 
     @SuppressLint("MissingPermission")
     private fun stopScanning() {
         BleLogger.d(TAG, "Stop scanning")
-
-        delaySubscription?.dispose()
-        delaySubscription = null
-
+        delayJob?.cancel()
+        delayJob = null
+        // Cancel any pending backoff-recovery so an explicit stop is honoured.
+        backoffJob?.cancel()
+        backoffJob = null
+        isRecovering = false
         try {
             bluetoothAdapter.bluetoothLeScanner.stopScan(leScanCallback)
         } catch (ex: Exception) {

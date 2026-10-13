@@ -1,4 +1,3 @@
-
 Pod::Spec.new do |s|  
     s.name              = 'PolarBleSdk'
     s.version		 = '6.16.1'
